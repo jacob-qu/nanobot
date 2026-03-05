@@ -110,28 +110,83 @@ class WebFetchTool(Tool):
     """Fetch and extract content from a URL using Readability."""
 
     name = "web_fetch"
-    description = "Fetch URL and extract readable content (HTML → markdown/text)."
+    description = (
+        "Fetch URL and extract readable content (HTML → markdown/text). "
+        "Set useJina=true to render JavaScript-heavy/dynamic pages via Jina Reader."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "URL to fetch"},
             "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
-            "maxChars": {"type": "integer", "minimum": 100}
+            "maxChars": {"type": "integer", "minimum": 100},
+            "useJina": {"type": "boolean", "description": "Use Jina Reader to render JS-heavy pages", "default": False}
         },
         "required": ["url"]
     }
 
-    def __init__(self, max_chars: int = 50000, proxy: str | None = None):
+    JINA_READER_URL = "https://r.jina.ai/"
+
+    def __init__(self, max_chars: int = 50000, proxy: str | None = None, jina_api_key: str | None = None):
         self.max_chars = max_chars
         self.proxy = proxy
+        self._init_jina_api_key = jina_api_key
 
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
-        from readability import Document
+    @property
+    def jina_api_key(self) -> str:
+        """Resolve Jina API key at call time so env/config changes are picked up."""
+        return self._init_jina_api_key or os.environ.get("JINA_API_KEY", "")
 
+    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None,
+                      useJina: bool = False, **kwargs: Any) -> str:
         max_chars = maxChars or self.max_chars
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
+
+        if useJina:
+            return await self._fetch_via_jina(url, extractMode, max_chars)
+        return await self._fetch_direct(url, extractMode, max_chars)
+
+    async def _fetch_via_jina(self, url: str, extractMode: str, max_chars: int) -> str:
+        """Fetch URL via Jina Reader API (renders JavaScript)."""
+        jina_url = self.JINA_READER_URL + url
+        headers = {"User-Agent": USER_AGENT}
+        if extractMode == "text":
+            headers["X-Return-Format"] = "text"
+        else:
+            headers["X-Return-Format"] = "markdown"
+        if self.jina_api_key:
+            headers["Authorization"] = f"Bearer {self.jina_api_key}"
+
+        try:
+            logger.debug("WebFetch(jina): {}", "proxy enabled" if self.proxy else "direct connection")
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                max_redirects=MAX_REDIRECTS,
+                timeout=60.0,
+                proxy=self.proxy,
+            ) as client:
+                r = await client.get(jina_url, headers=headers)
+                r.raise_for_status()
+
+            text = r.text
+            truncated = len(text) > max_chars
+            if truncated:
+                text = text[:max_chars]
+
+            return json.dumps({"url": url, "extractor": "jina", "truncated": truncated,
+                              "length": len(text), "text": text}, ensure_ascii=False)
+        except httpx.ProxyError as e:
+            logger.error("WebFetch(jina) proxy error for {}: {}", url, e)
+            return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)
+        except Exception as e:
+            logger.error("WebFetch(jina) error for {}: {}", url, e)
+            return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
+
+    async def _fetch_direct(self, url: str, extractMode: str, max_chars: int) -> str:
+        """Fetch URL directly via httpx + readability."""
+        from readability import Document
 
         try:
             logger.debug("WebFetch: {}", "proxy enabled" if self.proxy else "direct connection")

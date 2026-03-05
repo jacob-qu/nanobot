@@ -288,11 +288,18 @@ class WebSearchConfig(Base):
     max_results: int = 5
 
 
+class WebFetchConfig(Base):
+    """Web fetch tool configuration."""
+
+    jina_api_key: str = ""  # Jina Reader API key (optional, for higher rate limits)
+
+
 class WebToolsConfig(Base):
     """Web tools configuration."""
 
     proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
+    fetch: WebFetchConfig = Field(default_factory=WebFetchConfig)
 
 
 class ExecToolConfig(Base):

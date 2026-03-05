@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(echo:*)",
+      "Read(//c/Users/qujia/pip/**)",
+      "Read(//c/Users/qujia/AppData/Roaming/**)",
+      "Read(//c/Users/qujia/**)",
+      "Bash(cat:*)",
+      "Bash(timeout 15 nanobot gateway:*)",
+      "Bash(wc:*)",
+      "Bash(export:*)",
+      "Bash(python:*)"
+    ]
+  }
+}
