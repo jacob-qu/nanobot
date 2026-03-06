@@ -11,7 +11,16 @@
       "Bash(timeout 15 nanobot gateway:*)",
       "Bash(wc:*)",
       "Bash(export:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(chmod +x:*)",
+      "Bash(./start.sh status:*)",
+      "Bash(./start.sh start:*)",
+      "Bash(./start.sh stop:*)",
+      "Bash(tasklist:*)",
+      "Bash(wmic process:*)",
+      "Bash(powershell:*)",
+      "Bash(curl:*)",
+      "Bash(bash:*)"
     ]
   }
 }

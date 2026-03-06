@@ -1013,6 +1013,47 @@ If you edit the `.service` file itself, run `systemctl --user daemon-reload` bef
 > loginctl enable-linger $USER
 > ```
 
+## 🛡️ Service Script (Cross-Platform)
+
+For environments without systemd (Windows/Git Bash, macOS, or minimal Linux), use the included `start.sh` daemon script. It provides **preflight checks**, **background persistence**, and **auto-restart on failure**.
+
+**Commands:**
+
+```bash
+./start.sh            # Start the service (default)
+./start.sh stop       # Stop the service
+./start.sh restart    # Restart the service
+./start.sh status     # Check service status
+```
+
+**What it does on startup:**
+
+1. Reads `~/.nanobot/config.json` and prints the configured **model**, **provider**, and **API base**
+2. Sends a minimal test request to verify the **API token** is valid
+3. Launches the gateway as a background daemon (survives terminal close)
+4. Monitors the gateway process every 30 seconds — auto-restarts on crash (up to 50 restarts per hour)
+
+**Logs:**
+
+```bash
+tail -f ~/.nanobot/logs/gateway.log
+```
+
+**Example output:**
+
+```
+[2026-03-06 01:34:55] === Preflight check ===
+[2026-03-06 01:34:58] Model:    minimax/minimax-m2.5
+[2026-03-06 01:34:58] Provider: custom
+[2026-03-06 01:34:58] API Base: https://api.ofox.ai/v1
+[2026-03-06 01:34:58] API Key:  sk-of-fo***
+[2026-03-06 01:35:08] Token verification: OK
+[2026-03-06 01:35:08] === Preflight passed ===
+[2026-03-06 01:35:08] Service started (daemon PID=2500)
+```
+
+> **Note:** On Windows, run this script from **Git Bash** or **MSYS2**. Set `PYTHONIOENCODING=utf-8` if you encounter encoding errors (the script sets this automatically).
+
 ## 📁 Project Structure
 
 ```

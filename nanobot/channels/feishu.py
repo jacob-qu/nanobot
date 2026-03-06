@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -260,6 +261,8 @@ class FeishuChannel(BaseChannel):
     """
 
     name = "feishu"
+    _WAKE_CHECK_INTERVAL = 10  # seconds between wake checks
+    _WAKE_THRESHOLD = 30  # seconds of unexpected gap to consider a system wake
 
     def __init__(self, config: FeishuConfig, bus: MessageBus):
         super().__init__(config, bus)
@@ -314,7 +317,6 @@ class FeishuChannel(BaseChannel):
                 except Exception as e:
                     logger.warning("Feishu WebSocket error: {}", e)
                 if self._running:
-                    import time
                     time.sleep(5)
 
         self._ws_thread = threading.Thread(target=run_ws, daemon=True)
@@ -323,9 +325,38 @@ class FeishuChannel(BaseChannel):
         logger.info("Feishu bot started with WebSocket long connection")
         logger.info("No public IP required - using WebSocket to receive events")
 
-        # Keep running until stopped
+        # Keep running until stopped, with system-wake detection
+        last_check = time.monotonic()
         while self._running:
-            await asyncio.sleep(1)
+            await asyncio.sleep(self._WAKE_CHECK_INTERVAL)
+            now = time.monotonic()
+            elapsed = now - last_check
+            last_check = now
+            if elapsed > self._WAKE_CHECK_INTERVAL + self._WAKE_THRESHOLD:
+                logger.warning(
+                    "System wake detected (expected {}s, elapsed {:.0f}s) — forcing WebSocket reconnect",
+                    self._WAKE_CHECK_INTERVAL, elapsed,
+                )
+                self._force_reconnect()
+
+    def _force_reconnect(self) -> None:
+        """Force WebSocket reconnection by closing the underlying connection.
+
+        The lark SDK's auto-reconnect will re-establish the connection automatically.
+        """
+        if not self._ws_client:
+            return
+        try:
+            from lark_oapi.ws import client as ws_module
+            ws_loop = ws_module.loop
+            conn = self._ws_client._conn
+            if conn is not None:
+                asyncio.run_coroutine_threadsafe(conn.close(), ws_loop)
+                logger.info("Forced WebSocket close for reconnection")
+            else:
+                logger.debug("WebSocket connection already None, reconnect may be in progress")
+        except Exception as e:
+            logger.warning("Error forcing WebSocket reconnect: {}", e)
 
     async def stop(self) -> None:
         """
