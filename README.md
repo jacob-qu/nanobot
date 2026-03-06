@@ -119,7 +119,7 @@ pip install nanobot-ai
 
 > [!TIP]
 > Set your API key in `~/.nanobot/config.json`.
-> Get API keys: [OpenRouter](https://openrouter.ai/keys) (Global) · [Brave Search](https://brave.com/search/api/) (optional, for web search)
+> Get API keys: [OpenRouter](https://openrouter.ai/keys) (Global) · [Tavily](https://tavily.com/) (optional, for web search)
 
 **1. Initialize**
 
@@ -814,6 +814,32 @@ That's it! Environment variables, model prefixing, config matching, and `nanobot
 | `strip_model_prefix` | Strip existing prefix before re-prefixing | `True` (for AiHubMix) |
 
 </details>
+
+
+### Web Search
+
+nanobot has a built-in `web_search` tool powered by [Tavily](https://tavily.com/). It's optional — if no API key is configured, the tool is simply unavailable.
+
+**1. Get a free API key** at [tavily.com](https://tavily.com/) (1,000 searches/month free)
+
+**2. Add to config** (`~/.nanobot/config.json`):
+
+```json
+{
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "tvly-xxx"
+      }
+    }
+  }
+}
+```
+
+Or set the environment variable: `export TAVILY_API_KEY=tvly-xxx`
+
+> [!TIP]
+> You can also configure an HTTP/SOCKS5 proxy for web tools: `"tools": { "web": { "proxy": "http://127.0.0.1:7890" } }`
 
 
 ### MCP (Model Context Protocol)

@@ -20,7 +20,8 @@
       "Bash(wmic process:*)",
       "Bash(powershell:*)",
       "Bash(curl:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "WebSearch"
     ]
   }
 }
