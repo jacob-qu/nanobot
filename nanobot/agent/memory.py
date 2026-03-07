@@ -121,7 +121,19 @@ class MemoryStore:
             )
 
             if not response.has_tool_calls:
-                logger.warning("Memory consolidation: LLM did not call save_memory, skipping")
+                # Fallback: some models return text instead of calling the tool.
+                # Use the text reply as a history entry so /new doesn't fail.
+                text = (response.content or "").strip()
+                if text:
+                    logger.warning("Memory consolidation: LLM did not call save_memory, using text fallback")
+                    from datetime import datetime
+                    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M]")
+                    if not text.startswith("["):
+                        text = f"{timestamp} {text}"
+                    self.append_history(text)
+                    session.last_consolidated = 0 if archive_all else len(session.messages) - keep_count
+                    return True
+                logger.warning("Memory consolidation: LLM returned empty response, skipping")
                 return False
 
             args = response.tool_calls[0].arguments

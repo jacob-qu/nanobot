@@ -7,6 +7,7 @@ import json
 import re
 import weakref
 from contextlib import AsyncExitStack
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -66,6 +67,7 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        session_timeout_minutes: int = 0,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -84,6 +86,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.session_timeout_minutes = session_timeout_minutes
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -394,7 +397,44 @@ class AgentLoop:
                                   content="New session started.")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/status — Show session context status\n/help — Show available commands")
+        if cmd == "/status":
+            unconsolidated = len(session.messages) - session.last_consolidated
+            total = len(session.messages)
+            age = (datetime.now() - session.updated_at).total_seconds()
+            age_str = f"{int(age // 3600)}h{int((age % 3600) // 60)}m" if age >= 3600 else f"{int(age // 60)}m"
+            timeout_str = f"{self.session_timeout_minutes}m" if self.session_timeout_minutes > 0 else "off"
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=f"📊 Session Status\n\n"
+                                          f"- Context: {unconsolidated}/{self.memory_window} messages\n"
+                                          f"- Total messages: {total}\n"
+                                          f"- Consolidated: {session.last_consolidated}\n"
+                                          f"- Last active: {age_str} ago\n"
+                                          f"- Session timeout: {timeout_str}")
+
+        # Session timeout: auto-reset if idle too long
+        session_was_reset = False
+        if self.session_timeout_minutes > 0 and session.messages:
+            idle = datetime.now() - session.updated_at
+            if idle > timedelta(minutes=self.session_timeout_minutes):
+                logger.info("Session {} idle for {}, auto-resetting", key, idle)
+                # Try to consolidate before clearing
+                snapshot = session.messages[session.last_consolidated:]
+                if snapshot:
+                    temp = Session(key=session.key)
+                    temp.messages = list(snapshot)
+                    try:
+                        await self._consolidate_memory(temp, archive_all=True)
+                    except Exception:
+                        logger.exception("Timeout consolidation failed for {}", key)
+                session.clear()
+                self.sessions.save(session)
+                session_was_reset = True
+                idle_str = f"{int(idle.total_seconds() // 3600)}h{int((idle.total_seconds() % 3600) // 60)}m" if idle.total_seconds() >= 3600 else f"{int(idle.total_seconds() // 60)}m"
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"💤 会话已空闲 {idle_str}，上下文已自动归档并重置。当前为新会话。",
+                ))
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
@@ -404,7 +444,8 @@ class AgentLoop:
             async def _consolidate_and_unlock():
                 try:
                     async with lock:
-                        await self._consolidate_memory(session)
+                        if await self._consolidate_memory(session):
+                            self.sessions.save(session)
                 finally:
                     self._consolidating.discard(session.key)
                     _task = asyncio.current_task()
@@ -450,14 +491,16 @@ class AgentLoop:
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        out_meta = dict(msg.metadata or {})
+        out_meta["_context_msgs"] = len(session.messages) - session.last_consolidated
+        out_meta["_context_max"] = self.memory_window
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
-            metadata=msg.metadata or {},
+            metadata=out_meta,
         )
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """Save new-turn messages into session, truncating large tool results."""
-        from datetime import datetime
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")

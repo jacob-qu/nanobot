@@ -21,7 +21,8 @@
       "Bash(powershell:*)",
       "Bash(curl:*)",
       "Bash(bash:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(ps:*)"
     ]
   }
 }

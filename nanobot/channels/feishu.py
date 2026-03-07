@@ -688,7 +688,17 @@ class FeishuChannel(BaseChannel):
                         )
 
             if msg.content and msg.content.strip():
-                card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
+                elements = self._build_card_elements(msg.content)
+                # Append context status footer if metadata is present
+                ctx_msgs = msg.metadata.get("_context_msgs")
+                ctx_max = msg.metadata.get("_context_max")
+                if ctx_msgs is not None and ctx_max is not None:
+                    elements.append({"tag": "hr"})
+                    elements.append({
+                        "tag": "note",
+                        "elements": [{"tag": "plain_text", "content": f"📝 上下文 {ctx_msgs}/{ctx_max}"}],
+                    })
+                card = {"config": {"wide_screen_mode": True}, "elements": elements}
                 await loop.run_in_executor(
                     None, self._send_message_sync,
                     receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False),

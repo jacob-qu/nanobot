@@ -292,6 +292,7 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        session_timeout_minutes=config.agents.defaults.session_timeout_minutes,
     )
 
     # Set cron callback (needs agent)
@@ -475,6 +476,7 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
+        session_timeout_minutes=config.agents.defaults.session_timeout_minutes,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on

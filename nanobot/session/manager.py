@@ -44,6 +44,15 @@ class Session:
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
+        # Guard: reset last_consolidated if it points beyond the message list
+        # (can happen if consolidation updated the pointer but messages were
+        # lost due to a crash/restart race condition)
+        if self.last_consolidated > len(self.messages):
+            logger.warning(
+                "Session {}: last_consolidated ({}) > message count ({}), resetting to 0",
+                self.key, self.last_consolidated, len(self.messages),
+            )
+            self.last_consolidated = 0
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
 
