@@ -1,6 +1,19 @@
 # Release Note
 
-## Bug Fixes
+## 2026-03-08
+
+### `/status` 显示 API 额度信息
+
+`/status` 命令新增 API 额度查询，在原有会话状态之后追加显示：
+
+- **LLM Provider**：尝试通过 OneAPI 兼容接口 (`/api/user/self`) 查询余额；若网关不支持则显示 `(no billing API)`
+- **Tavily Search**：通过 `GET /usage` 接口查询当前 Plan、已用/总额度、剩余 credits
+
+两项查询均有超时和错误兜底，不影响基础状态信息的返回。
+
+- `agent/loop.py`: 新增 `_fetch_quota_status()` 方法，`/status` 处理分支改为 async 调用
+
+## 2026-03-07
 
 ### 修复飞书机器人上下文丢失问题
 
@@ -14,8 +27,6 @@
 部分模型（如 minimax-m2.5）在 memory consolidation 时不调用 `save_memory` tool，而是直接返回文本，导致 `/new` 报错 "Memory archival failed"。
 
 - `agent/memory.py`: 增加 text fallback，当 LLM 未调用 tool 但返回了文本时，将文本写入 HISTORY.md 作为归档记录，不再阻断 `/new` 流程
-
-## New Features
 
 ### 飞书卡片显示上下文状态
 

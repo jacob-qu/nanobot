@@ -397,20 +397,28 @@ class AgentLoop:
                                   content="New session started.")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/status — Show session context status\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/status — Show session status & API quota\n/help — Show available commands")
         if cmd == "/status":
             unconsolidated = len(session.messages) - session.last_consolidated
             total = len(session.messages)
             age = (datetime.now() - session.updated_at).total_seconds()
             age_str = f"{int(age // 3600)}h{int((age % 3600) // 60)}m" if age >= 3600 else f"{int(age // 60)}m"
             timeout_str = f"{self.session_timeout_minutes}m" if self.session_timeout_minutes > 0 else "off"
+            lines = [
+                "📊 Session Status\n",
+                f"- Context: {unconsolidated}/{self.memory_window} messages",
+                f"- Total messages: {total}",
+                f"- Consolidated: {session.last_consolidated}",
+                f"- Last active: {age_str} ago",
+                f"- Session timeout: {timeout_str}",
+            ]
+            # Fetch API quota info
+            quota_lines = await self._fetch_quota_status()
+            if quota_lines:
+                lines.append("")
+                lines.extend(quota_lines)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content=f"📊 Session Status\n\n"
-                                          f"- Context: {unconsolidated}/{self.memory_window} messages\n"
-                                          f"- Total messages: {total}\n"
-                                          f"- Consolidated: {session.last_consolidated}\n"
-                                          f"- Last active: {age_str} ago\n"
-                                          f"- Session timeout: {timeout_str}")
+                                  content="\n".join(lines))
 
         # Session timeout: auto-reset if idle too long
         session_was_reset = False
@@ -539,6 +547,69 @@ class AgentLoop:
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
+
+    async def _fetch_quota_status(self) -> list[str]:
+        """Fetch API quota info from LLM provider and Tavily."""
+        import httpx
+
+        lines: list[str] = []
+
+        # --- LLM Provider (OneAPI-compatible billing endpoint) ---
+        api_base = getattr(self.provider, "api_base", None)
+        api_key = getattr(self.provider, "api_key", None)
+        if api_base and api_key:
+            base = api_base.rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3]
+            headers = {"Authorization": f"Bearer {api_key}"}
+            fetched = False
+            # Try OneAPI /api/user/self first
+            try:
+                async with httpx.AsyncClient(proxy=self.web_proxy, timeout=10.0) as client:
+                    r = await client.get(f"{base}/api/user/self", headers=headers)
+                    if r.status_code == 200:
+                        data = r.json().get("data", {})
+                        quota = data.get("quota", 0)
+                        used = data.get("used_quota", 0)
+                        unit = 500000  # OneAPI: 500000 = $1
+                        lines.append("💰 LLM Provider Quota")
+                        lines.append(f"- Balance: ${(quota - used) / unit:.4f}")
+                        lines.append(f"- Used: ${used / unit:.4f}")
+                        lines.append(f"- Total: ${quota / unit:.4f}")
+                        fetched = True
+            except Exception as e:
+                logger.debug("Failed to fetch LLM quota (OneAPI): {}", e)
+            if not fetched:
+                lines.append(f"💰 LLM Provider: {base} (no billing API)")
+
+        # --- Tavily Search ---
+        if self.search_api_key:
+            try:
+                async with httpx.AsyncClient(proxy=self.web_proxy, timeout=10.0) as client:
+                    r = await client.get(
+                        "https://api.tavily.com/usage",
+                        headers={"Authorization": f"Bearer {self.search_api_key}"},
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    account = data.get("account", {})
+                    plan = account.get("current_plan", "unknown")
+                    used = account.get("plan_usage", 0)
+                    limit = account.get("plan_limit")
+                    lines.append("🔍 Tavily Search")
+                    lines.append(f"- Plan: {plan}")
+                    if limit:
+                        lines.append(f"- Used: {used}/{limit} credits")
+                        lines.append(f"- Remaining: {limit - used}")
+                    else:
+                        lines.append(f"- Used: {used} credits (unlimited)")
+            except Exception as e:
+                logger.debug("Failed to fetch Tavily usage: {}", e)
+                lines.append("🔍 Tavily Search: configured (usage check failed)")
+        else:
+            lines.append("🔍 Tavily Search: not configured")
+
+        return lines
 
     async def process_direct(
         self,

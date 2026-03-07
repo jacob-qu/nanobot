@@ -1,6 +1,6 @@
 ---
 name: cron
-description: Schedule reminders and recurring tasks.
+description: Schedule reminders and recurring tasks. Includes reliability guarantees: periodic tick loop (max 60s drift), missed job catch-up on restart, and audit logging for execution history verification.
 ---
 
 # Cron
@@ -55,3 +55,27 @@ cron(action="remove", job_id="abc123")
 ## Timezone
 
 Use `tz` with `cron_expr` to schedule in a specific IANA timezone. Without `tz`, the server's local timezone is used.
+
+## Reliability Guarantees
+
+The cron service provides three layers of reliability:
+
+### 1. Periodic Tick Loop (max 60s drift)
+The scheduler checks for due jobs at most every 60 seconds instead of sleeping until the exact next-run time. This makes it resilient to system suspend/resume, clock adjustments, and asyncio drift.
+
+### 2. Missed Job Catch-up on Restart
+When the service starts, it detects `cron` and `at` type jobs whose scheduled time passed while the service was offline, and executes them immediately. Interval (`every`) jobs simply reschedule from now since replaying missed intervals is not meaningful.
+
+### 3. Audit Log
+Every execution is appended to `~/.nanobot/data/cron/audit.log` with format:
+```
+timestamp | job_id | job_name | status [| error]
+```
+
+Example:
+```
+2026-03-08 09:00:01+0800 | a1b2c3d4 | Morning report | ok
+2026-03-08 21:00:00+0800 | e5f6g7h8 | Evening reminder | error | Connection timeout
+```
+
+Use this log to verify daily jobs are executing as expected without waiting for next-day feedback.

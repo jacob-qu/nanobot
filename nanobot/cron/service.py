@@ -12,6 +12,10 @@ from loguru import logger
 
 from nanobot.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
 
+# Maximum sleep between tick cycles (seconds).
+# Keeps the service responsive to clock adjustments and system resume.
+_MAX_TICK_INTERVAL_S = 60
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -81,6 +85,22 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
             raise ValueError(f"invalid cron expression '{schedule.expr}': {e}") from None
 
 
+def _append_audit_log(store_path: Path, job: CronJob, status: str, error: str | None = None) -> None:
+    """Append a line to the cron audit log (sibling of jobs.json)."""
+    try:
+        log_path = store_path.parent / "audit.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+        parts = [ts, job.id, job.name, status]
+        if error:
+            parts.append(error[:200])
+        line = " | ".join(parts) + "\n"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        logger.debug("Cron: audit log write failed: {}", e)
+
+
 class CronService:
     """Service for managing and executing scheduled jobs."""
 
@@ -93,7 +113,7 @@ class CronService:
         self.on_job = on_job
         self._store: CronStore | None = None
         self._last_mtime: float = 0.0
-        self._timer_task: asyncio.Task | None = None
+        self._tick_task: asyncio.Task | None = None
         self._running = False
 
     def _load_store(self) -> CronStore:
@@ -197,26 +217,66 @@ class CronService:
         """Start the cron service."""
         self._running = True
         self._load_store()
+        await self._catch_up_missed_jobs()
         self._recompute_next_runs()
         self._save_store()
-        self._arm_timer()
+        self._start_tick_loop()
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
 
     def stop(self) -> None:
         """Stop the cron service."""
         self._running = False
-        if self._timer_task:
-            self._timer_task.cancel()
-            self._timer_task = None
+        if self._tick_task:
+            self._tick_task.cancel()
+            self._tick_task = None
 
     def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
+        """Recompute next run times for enabled jobs that need it.
+
+        - 'every' jobs always get recomputed from now (relative scheduling).
+        - 'cron'/'at' jobs only get computed if they don't already have a next_run_at_ms
+          (to preserve persisted values for catch-up detection).
+        """
         if not self._store:
             return
         now = _now_ms()
         for job in self._store.jobs:
-            if job.enabled:
+            if not job.enabled:
+                continue
+            if job.schedule.kind == "every":
                 job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+            elif not job.state.next_run_at_ms:
+                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+
+    async def _catch_up_missed_jobs(self) -> None:
+        """Detect jobs whose next_run_at_ms is in the past (missed while offline) and execute them.
+
+        Only applies to 'cron' and 'at' schedule types. Interval ('every') jobs simply
+        get their next_run_at_ms recomputed from now, since replaying missed intervals
+        is not meaningful.
+        """
+        if not self._store:
+            return
+        now = _now_ms()
+        missed = []
+        for j in self._store.jobs:
+            if not j.enabled or not j.state.next_run_at_ms:
+                continue
+            if j.state.next_run_at_ms >= now:
+                continue
+            if j.schedule.kind in ("cron", "at"):
+                missed.append(j)
+            elif j.schedule.kind == "every":
+                # Just reschedule from now instead of catching up
+                j.state.next_run_at_ms = _compute_next_run(j.schedule, now)
+
+        if missed:
+            logger.info("Cron: {} missed job(s) detected, catching up", len(missed))
+        for job in missed:
+            logger.info("Cron: catching up missed job '{}' (was due {}ms ago)", job.name, now - job.state.next_run_at_ms)
+            await self._execute_job(job)
+        if missed:
+            self._save_store()
 
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
@@ -226,27 +286,41 @@ class CronService:
                  if j.enabled and j.state.next_run_at_ms]
         return min(times) if times else None
 
-    def _arm_timer(self) -> None:
-        """Schedule the next timer tick."""
-        if self._timer_task:
-            self._timer_task.cancel()
-
-        next_wake = self._get_next_wake_ms()
-        if not next_wake or not self._running:
+    def _start_tick_loop(self) -> None:
+        """Start the periodic tick loop."""
+        if self._tick_task:
+            self._tick_task.cancel()
+        if not self._running:
             return
+        self._tick_task = asyncio.create_task(self._tick_loop())
 
-        delay_ms = max(0, next_wake - _now_ms())
-        delay_s = delay_ms / 1000
+    async def _tick_loop(self) -> None:
+        """Periodically check for due jobs. Sleeps at most _MAX_TICK_INTERVAL_S between checks."""
+        while self._running:
+            try:
+                next_wake = self._get_next_wake_ms()
+                if next_wake:
+                    delay_s = max(0, (next_wake - _now_ms()) / 1000)
+                    # Cap the sleep so we re-check frequently
+                    sleep_s = min(delay_s, _MAX_TICK_INTERVAL_S)
+                else:
+                    sleep_s = _MAX_TICK_INTERVAL_S
 
-        async def tick():
-            await asyncio.sleep(delay_s)
-            if self._running:
-                await self._on_timer()
+                await asyncio.sleep(sleep_s)
 
-        self._timer_task = asyncio.create_task(tick())
+                if not self._running:
+                    break
 
-    async def _on_timer(self) -> None:
-        """Handle timer tick - run due jobs."""
+                await self._on_tick()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Cron: tick loop error: {}", e)
+                # Avoid tight error loop
+                await asyncio.sleep(5)
+
+    async def _on_tick(self) -> None:
+        """Handle tick - run due jobs."""
         self._load_store()
         if not self._store:
             return
@@ -260,8 +334,8 @@ class CronService:
         for job in due_jobs:
             await self._execute_job(job)
 
-        self._save_store()
-        self._arm_timer()
+        if due_jobs:
+            self._save_store()
 
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
@@ -276,11 +350,13 @@ class CronService:
             job.state.last_status = "ok"
             job.state.last_error = None
             logger.info("Cron: job '{}' completed", job.name)
+            _append_audit_log(self.store_path, job, "ok")
 
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
             logger.error("Cron: job '{}' failed: {}", job.name, e)
+            _append_audit_log(self.store_path, job, "error", str(e))
 
         job.state.last_run_at_ms = start_ms
         job.updated_at_ms = _now_ms()
@@ -339,7 +415,6 @@ class CronService:
 
         store.jobs.append(job)
         self._save_store()
-        self._arm_timer()
 
         logger.info("Cron: added job '{}' ({})", name, job.id)
         return job
@@ -353,7 +428,6 @@ class CronService:
 
         if removed:
             self._save_store()
-            self._arm_timer()
             logger.info("Cron: removed job {}", job_id)
 
         return removed
@@ -370,7 +444,6 @@ class CronService:
                 else:
                     job.state.next_run_at_ms = None
                 self._save_store()
-                self._arm_timer()
                 return job
         return None
 
@@ -383,7 +456,6 @@ class CronService:
                     return False
                 await self._execute_job(job)
                 self._save_store()
-                self._arm_timer()
                 return True
         return False
 
