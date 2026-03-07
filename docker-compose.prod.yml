@@ -1,0 +1,21 @@
+# Production compose for Mac Mini
+# Usage: docker compose -f docker-compose.prod.yml up -d
+
+services:
+  nanobot-gateway:
+    container_name: nanobot-gateway
+    image: ghcr.io/jacob-qu/nanobot:latest
+    command: ["gateway"]
+    restart: unless-stopped
+    ports:
+      - 18790:18790
+    volumes:
+      - ~/.nanobot:/root/.nanobot
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
