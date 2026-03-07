@@ -55,7 +55,7 @@ class CronTool(Tool):
                 },
                 "cron_expr": {
                     "type": "string",
-                    "description": "Cron expression like '0 9 * * *' (for scheduled tasks)",
+                    "description": "Standard 5-field cron expression: 'min hour day month weekday' (e.g. '30 9 * * *' for daily 9:30). Do NOT use 6-field or Quartz-style syntax.",
                 },
                 "tz": {
                     "type": "string",

@@ -17,6 +17,11 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _is_6field(expr: str) -> bool:
+    """Return True if expr has 6 space-separated fields (Quartz-style with seconds)."""
+    return len(expr.strip().split()) == 6
+
+
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     """Compute next run time in ms."""
     if schedule.kind == "at":
@@ -37,10 +42,15 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             base_time = now_ms / 1000
             tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
-            cron = croniter(schedule.expr, base_dt)
+            # Support Quartz-style 6-field expressions (seconds as first field)
+            kwargs = {}
+            if _is_6field(schedule.expr):
+                kwargs["second_at_beginning"] = True
+            cron = croniter(schedule.expr, base_dt, **kwargs)
             next_dt = cron.get_next(datetime)
             return int(next_dt.timestamp() * 1000)
-        except Exception:
+        except Exception as e:
+            logger.warning("Cron: failed to parse expression '{}': {}", schedule.expr, e)
             return None
 
     return None
@@ -58,6 +68,17 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
             ZoneInfo(schedule.tz)
         except Exception:
             raise ValueError(f"unknown timezone '{schedule.tz}'") from None
+
+    if schedule.kind == "cron" and schedule.expr:
+        try:
+            from croniter import croniter
+
+            kwargs = {}
+            if _is_6field(schedule.expr):
+                kwargs["second_at_beginning"] = True
+            croniter(schedule.expr, **kwargs)
+        except Exception as e:
+            raise ValueError(f"invalid cron expression '{schedule.expr}': {e}") from None
 
 
 class CronService:
