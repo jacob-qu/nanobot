@@ -2,6 +2,39 @@
 
 ## 2026-03-08
 
+### Token-based 上下文管理（参考 OpenClaw）
+
+将上下文管理从「消息条数」改为「Token 预算」，更精确地控制 LLM 上下文使用量。
+
+**背景**：原方案用 `memory_window=100` 按消息条数截断上下文，但一条短回复和一条长 tool result 权重相同，粒度太粗。参考 OpenClaw 的 context 管理策略（token 计量 + 分层裁剪 + 保护关键消息），为 nanobot 实现了轻量版方案。
+
+**核心改动**：
+
+1. **Token 估算**：`len(text) / 4` 粗估 token 数，覆盖 content、tool_calls、image 等
+2. **三阶段裁剪**（每次 LLM 调用前执行，保护最近 3 轮对话不动）：
+   - Phase 1 — Soft-trim：旧 tool result 保留头尾各 80 字符，中间替换为 `...[trimmed N chars]...`
+   - Phase 2 — Hard-clear：旧 tool result 替换为 `[pruned]`
+   - Phase 3 — Drop：从最旧的消息开始整条丢弃
+3. **归档触发**：从 `unconsolidated >= memory_window` 改为 `unconsolidated_tokens > context_tokens`
+4. **显示优化**：飞书 footer 和 `/status` 显示 token 用量和百分比
+
+**配置**：
+```json
+{ "agents": { "defaults": { "contextTokens": 32000 } } }
+```
+
+**文件变更**：
+
+| 文件 | 改动 |
+|------|------|
+| `agent/context_pruning.py` | 新建 — token 估算 + 三阶段裁剪 |
+| `config/schema.py` | 新增 `context_tokens` 配置项 |
+| `agent/loop.py` | 接入 pruning、归档改 token 触发、/status 显示 token |
+| `cli/commands.py` | 传递 `context_tokens` |
+| `channels/feishu.py` | footer 改为 `~X,XXX/32,000 tokens (XX%)` |
+| `start.sh` | 启动前自动清理 `__pycache__` |
+| `tests/test_consolidate_offset.py` | 适配 token 触发条件 |
+
 ### 会话空闲自动归档（后台主动扫描）
 
 优化 `/new` 命令响应速度：新增后台定时任务主动扫描空闲会话，超时后自动归档记忆并清除会话，同时向对应频道发送通知 `💤 会话已空闲 30m，上下文已自动归档并重置。`。用户再执行 `/new` 时无需等待 LLM 归档，毫秒级返回。

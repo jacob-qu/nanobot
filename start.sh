@@ -193,6 +193,11 @@ do_start() {
     fi
 
     cd "$SCRIPT_DIR"
+
+    # Clear Python bytecode cache to ensure fresh code is loaded
+    find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null
+    log "Cleared __pycache__"
+
     preflight || exit 1
 
     log "Launching daemon..."

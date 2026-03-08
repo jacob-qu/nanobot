@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.context_pruning import estimate_messages_tokens, prune_context
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
@@ -57,6 +58,7 @@ class AgentLoop:
         temperature: float = 0.1,
         max_tokens: int = 4096,
         memory_window: int = 100,
+        context_tokens: int = 32000,
         reasoning_effort: str | None = None,
         search_api_key: str | None = None,
         web_proxy: str | None = None,
@@ -79,6 +81,7 @@ class AgentLoop:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.memory_window = memory_window
+        self.context_tokens = context_tokens
         self.reasoning_effort = reasoning_effort
         self.search_api_key = search_api_key
         self.web_proxy = web_proxy
@@ -422,11 +425,12 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=self.memory_window)
+            history = session.get_history(max_messages=2000)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
+            messages, _ = prune_context(messages, self.context_tokens)
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
@@ -475,12 +479,15 @@ class AgentLoop:
         if cmd == "/status":
             unconsolidated = len(session.messages) - session.last_consolidated
             total = len(session.messages)
+            # Estimate tokens for unconsolidated history
+            history = session.get_history(max_messages=2000)
+            history_tokens = estimate_messages_tokens(history)
             age = (datetime.now() - session.updated_at).total_seconds()
             age_str = f"{int(age // 3600)}h{int((age % 3600) // 60)}m" if age >= 3600 else f"{int(age // 60)}m"
             timeout_str = f"{self.session_timeout_minutes}m" if self.session_timeout_minutes > 0 else "off"
             lines = [
                 "📊 Session Status\n",
-                f"- Context: {unconsolidated}/{self.memory_window} messages",
+                f"- Context: ~{history_tokens:,}/{self.context_tokens:,} tokens ({unconsolidated} messages)",
                 f"- Total messages: {total}",
                 f"- Consolidated: {session.last_consolidated}",
                 f"- Last active: {age_str} ago",
@@ -519,7 +526,10 @@ class AgentLoop:
                 ))
 
         unconsolidated = len(session.messages) - session.last_consolidated
-        if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
+        # Trigger consolidation when unconsolidated tokens exceed context budget
+        unconsolidated_msgs = session.messages[session.last_consolidated:]
+        unconsolidated_tokens = estimate_messages_tokens(unconsolidated_msgs)
+        if (unconsolidated_tokens > self.context_tokens and session.key not in self._consolidating):
             self._consolidating.add(session.key)
             lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
 
@@ -542,13 +552,16 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        history = session.get_history(max_messages=self.memory_window)
+        history = session.get_history(max_messages=2000)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
+
+        # Token-based context pruning: trim old tool results first
+        initial_messages, ctx_tokens = prune_context(initial_messages, self.context_tokens)
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -574,8 +587,8 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
         out_meta = dict(msg.metadata or {})
-        out_meta["_context_msgs"] = len(session.messages) - session.last_consolidated
-        out_meta["_context_max"] = self.memory_window
+        out_meta["_context_tokens"] = ctx_tokens
+        out_meta["_context_max_tokens"] = self.context_tokens
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
             metadata=out_meta,

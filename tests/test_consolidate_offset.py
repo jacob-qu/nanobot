@@ -495,7 +495,8 @@ class TestConsolidationDeduplicationGuard:
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"
         loop = AgentLoop(
-            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model",
+            memory_window=10, context_tokens=1,
         )
 
         loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
@@ -539,7 +540,8 @@ class TestConsolidationDeduplicationGuard:
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"
         loop = AgentLoop(
-            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model",
+            memory_window=10, context_tokens=1,
         )
 
         loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))

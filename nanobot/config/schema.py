@@ -226,7 +226,8 @@ class AgentDefaults(Base):
     max_tokens: int = 8192
     temperature: float = 0.1
     max_tool_iterations: int = 40
-    memory_window: int = 100
+    memory_window: int = 100  # Message count threshold for consolidation
+    context_tokens: int = 32000  # Token budget for LLM context (history pruning)
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
     session_timeout_minutes: int = 30  # Auto-reset session after N minutes of inactivity (0 = disabled)
 
