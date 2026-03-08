@@ -116,6 +116,7 @@ class AgentLoop:
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self._idle_check_task: asyncio.Task | None = None
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -268,6 +269,10 @@ class AgentLoop:
         await self._connect_mcp()
         logger.info("Agent loop started")
 
+        # Start background idle-session archival
+        if self.session_timeout_minutes > 0:
+            self._idle_check_task = asyncio.create_task(self._idle_session_loop())
+
         while self._running:
             try:
                 msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
@@ -296,6 +301,72 @@ class AgentLoop:
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content,
         ))
+
+    async def _idle_session_loop(self) -> None:
+        """Periodically scan cached sessions and archive idle ones in background."""
+        interval = max(60, self.session_timeout_minutes * 60 // 2)
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+                await self._archive_idle_sessions()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Idle session check failed")
+
+    async def _archive_idle_sessions(self) -> None:
+        """Find and archive sessions that have been idle beyond the timeout."""
+        threshold = timedelta(minutes=self.session_timeout_minutes)
+        now = datetime.now()
+
+        # Snapshot cache keys to avoid mutation during iteration
+        for key, session in list(self.sessions._cache.items()):
+            if not session.messages:
+                continue
+            if key in self._consolidating:
+                continue
+            idle = now - session.updated_at
+            if idle <= threshold:
+                continue
+
+            snapshot = session.messages[session.last_consolidated:]
+            if not snapshot:
+                # Nothing to archive, just clear
+                session.clear()
+                self.sessions.save(session)
+                continue
+
+            logger.info("Idle archival for session {} (idle {})", key, idle)
+            lock = self._consolidation_locks.setdefault(key, asyncio.Lock())
+            self._consolidating.add(key)
+
+            try:
+                async with lock:
+                    temp = Session(key=session.key)
+                    temp.messages = list(snapshot)
+                    try:
+                        await self._consolidate_memory(temp, archive_all=True)
+                    except Exception:
+                        logger.exception("Idle archival consolidation failed for {}", key)
+                    session.clear()
+                    self.sessions.save(session)
+            finally:
+                self._consolidating.discard(key)
+
+            # Notify the channel
+            if ":" in key:
+                channel, chat_id = key.split(":", 1)
+                idle_str = (
+                    f"{int(idle.total_seconds() // 3600)}h{int((idle.total_seconds() % 3600) // 60)}m"
+                    if idle.total_seconds() >= 3600
+                    else f"{int(idle.total_seconds() // 60)}m"
+                )
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=channel, chat_id=chat_id,
+                    content=f"💤 会话已空闲 {idle_str}，上下文已自动归档并重置。",
+                ))
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under the global lock."""
@@ -331,6 +402,9 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        if self._idle_check_task:
+            self._idle_check_task.cancel()
+            self._idle_check_task = None
         logger.info("Agent loop stopping")
 
     async def _process_message(
