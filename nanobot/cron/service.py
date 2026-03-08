@@ -223,11 +223,15 @@ class CronService:
         self._start_tick_loop()
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
 
-    def stop(self) -> None:
-        """Stop the cron service."""
+    async def stop(self) -> None:
+        """Stop the cron service and wait for the tick loop to finish."""
         self._running = False
         if self._tick_task:
             self._tick_task.cancel()
+            try:
+                await self._tick_task
+            except (asyncio.CancelledError, Exception):
+                pass
             self._tick_task = None
 
     def _recompute_next_runs(self) -> None:

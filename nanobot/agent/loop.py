@@ -473,9 +473,48 @@ class AgentLoop:
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
+        if cmd == "/compact":
+            snapshot = session.messages[session.last_consolidated:]
+            if not snapshot:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                      content="Nothing to compact.")
+            msg_count = len(snapshot)
+            token_count = estimate_messages_tokens(snapshot)
+            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+            self._consolidating.add(session.key)
+            summary = ""
+            try:
+                async with lock:
+                    temp = Session(key=session.key)
+                    temp.messages = list(snapshot)
+                    if not await self._consolidate_memory(temp, archive_all=True):
+                        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                              content="Compaction failed. Please try again.")
+                    store = MemoryStore(self.workspace)
+                    if store.history_file.exists():
+                        history_text = store.history_file.read_text(encoding="utf-8").strip()
+                        if history_text:
+                            summary = history_text.rsplit("\n\n", 1)[-1]
+            except Exception:
+                logger.exception("/compact failed for {}", session.key)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                      content="Compaction failed. Please try again.")
+            finally:
+                self._consolidating.discard(session.key)
+
+            session.clear()
+            if summary:
+                session.messages.append({
+                    "role": "assistant",
+                    "content": f"[Previous conversation summary]\n{summary}",
+                    "timestamp": datetime.now().isoformat(),
+                })
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=f"🗜 Compacted: {msg_count} messages (~{token_count:,} tokens) → summary. Memory updated.")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/status — Show session status & API quota\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/compact — Compress context, keep memory\n/stop — Stop the current task\n/status — Show session status & API quota\n/help — Show available commands")
         if cmd == "/status":
             unconsolidated = len(session.messages) - session.last_consolidated
             total = len(session.messages)

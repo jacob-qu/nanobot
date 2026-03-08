@@ -120,8 +120,8 @@ class TestMemoryConsolidationTypeHandling:
         assert "User discussed testing." in store.history_file.read_text()
 
     @pytest.mark.asyncio
-    async def test_no_tool_call_returns_false(self, tmp_path: Path) -> None:
-        """When LLM doesn't use the save_memory tool, return False."""
+    async def test_no_tool_call_uses_text_fallback(self, tmp_path: Path) -> None:
+        """When LLM returns text without calling save_memory, use text fallback."""
         store = MemoryStore(tmp_path)
         provider = AsyncMock()
         provider.chat = AsyncMock(
@@ -131,8 +131,9 @@ class TestMemoryConsolidationTypeHandling:
 
         result = await store.consolidate(session, provider, "test-model", memory_window=50)
 
-        assert result is False
-        assert not store.history_file.exists()
+        assert result is True
+        assert store.history_file.exists()
+        assert "I summarized the conversation." in store.history_file.read_text()
 
     @pytest.mark.asyncio
     async def test_skips_when_few_messages(self, tmp_path: Path) -> None:

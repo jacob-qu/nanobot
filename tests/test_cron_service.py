@@ -45,7 +45,7 @@ async def test_running_service_honors_external_disable(tmp_path) -> None:
     service = CronService(store_path, on_job=on_job)
     job = service.add_job(
         name="external-disable",
-        schedule=CronSchedule(kind="every", every_ms=200),
+        schedule=CronSchedule(kind="every", every_ms=2000),
         message="hello",
     )
     await service.start()
@@ -58,7 +58,7 @@ async def test_running_service_honors_external_disable(tmp_path) -> None:
         await asyncio.sleep(0.35)
         assert called == []
     finally:
-        service.stop()
+        await service.stop()
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_catch_up_missed_jobs_on_start(tmp_path) -> None:
     try:
         assert job.id in called
     finally:
-        service2.stop()
+        await service2.stop()
 
 
 @pytest.mark.asyncio
@@ -109,7 +109,7 @@ async def test_audit_log_written_on_execution(tmp_path) -> None:
     try:
         await asyncio.sleep(0.25)
     finally:
-        service.stop()
+        await service.stop()
 
     audit_path = tmp_path / "cron" / "audit.log"
     assert audit_path.exists()
@@ -141,7 +141,7 @@ async def test_tick_loop_recovers_from_job_error(tmp_path) -> None:
     try:
         await asyncio.sleep(0.35)
     finally:
-        service.stop()
+        await service.stop()
 
     # Should have been called more than once despite the first error
     assert call_count >= 2
