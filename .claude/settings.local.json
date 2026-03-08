@@ -22,7 +22,8 @@
       "Bash(curl:*)",
       "Bash(bash:*)",
       "WebSearch",
-      "Bash(ps:*)"
+      "Bash(ps:*)",
+      "WebFetch(domain:clawhub.ai)"
     ]
   }
 }

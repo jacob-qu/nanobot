@@ -2,6 +2,26 @@
 
 ## 2026-03-08
 
+### 自我进化机制
+
+为 nanobot 设计并落地了自我进化方案，使 agent 在与用户持续对话中不断积累认知，越来越"懂"用户。
+
+**方案设计**：参考 [pskoett/self-improving-agent](https://github.com/pskoett/self-improving-agent)，取其 UserPromptSubmit hook 提醒 + 分类记忆 + 晋升管道的核心思路，砍掉了 error-detector hook、重量级 ID 格式、多 agent 通信、skill 提取等过度工程部分，增加了用户画像（USER.md）和进化通知机制。
+
+**nanobot 侧（飞书）**：
+- `AGENTS.md`: 新增 Self-Evolution 指令段——定义 5 种进化触发条件、执行动作、通知格式
+- `USER.md`: 从空模板填入完整用户画像，agent 可通过 edit_file 自主更新
+
+**Claude Code 侧**：
+- `scripts/self-improve-activator.sh`: UserPromptSubmit hook 脚本，每次对话注入反思提醒
+- `.claude/settings.json`: 注册 hook
+- `memory/`: 新增 user-profile.md（用户画像）、learnings.md（进化日志）
+
+**进化流程**：
+```
+对话中检测信号（纠正/偏好/拒绝/模式） → 更新记忆文件 → 通知用户确认/纠正
+```
+
 ### `/status` 显示 API 额度信息
 
 `/status` 命令新增 API 额度查询，在原有会话状态之后追加显示：
