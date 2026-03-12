@@ -283,6 +283,13 @@ class FeishuChannel(BaseChannel):
             logger.error("Feishu app_id and app_secret not configured")
             return
 
+        # Bypass system proxy for Feishu domains (requests reads Windows proxy settings)
+        no_proxy = os.environ.get("NO_PROXY", "")
+        feishu_domains = ".feishu.cn,.larksuite.com"
+        if not any(d in no_proxy for d in feishu_domains.split(",")):
+            os.environ["NO_PROXY"] = f"{no_proxy},{feishu_domains}" if no_proxy else feishu_domains
+            logger.info("Set NO_PROXY for Feishu domains: {}", os.environ["NO_PROXY"])
+
         self._running = True
         self._loop = asyncio.get_running_loop()
 
