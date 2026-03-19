@@ -5,6 +5,9 @@
 .env
 .web
 .orion
+CLAUDE.md
+start.sh
+docs/superpowers/
 
 # Python bytecode & caches
 *.pyc
