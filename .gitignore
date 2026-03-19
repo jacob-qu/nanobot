@@ -3,6 +3,9 @@
 .docs
 .env
 .web
+CLAUDE.md
+start.sh
+docs/superpowers/
 *.pyc
 dist/
 build/
