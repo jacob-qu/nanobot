@@ -2,6 +2,9 @@
 .assets
 .docs
 .env
+CLAUDE.md
+start.sh
+docs/superpowers/
 *.pyc
 dist/
 build/
