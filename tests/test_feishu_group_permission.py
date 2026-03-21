@@ -252,6 +252,7 @@ def test_guest_consolidation_skipped() -> None:
     )
     asyncio.get_event_loop().run_until_complete(lp._process_message(msg))
     lp.memory_consolidator.maybe_consolidate_by_tokens.assert_not_called()
+    lp._schedule_background.assert_not_called()
 
 
 def test_owner_session_saved_normally() -> None:

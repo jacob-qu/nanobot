@@ -441,7 +441,7 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
                 content="权限不足：此命令需要主人授权。",
-                metadata=msg.metadata or {},
+                metadata=msg.metadata,
             )
 
         session = self.sessions.get_or_create(key)
@@ -521,7 +521,7 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
-            metadata=msg.metadata or {},
+            metadata=msg.metadata,
         )
 
     @staticmethod
