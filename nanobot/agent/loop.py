@@ -212,6 +212,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        metadata: dict | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
         messages = initial_messages
@@ -258,7 +259,11 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    guest_allowed = (metadata or {}).get("guest_allowed_tools")
+                    if guest_allowed is not None and tool_call.name not in guest_allowed:
+                        result = "权限不足：此操作需要主人授权，无法执行。"
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -430,6 +435,15 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
+
+        # Guest mode: block all slash commands before session is created
+        if msg.metadata.get("guest_mode") and msg.content.strip().startswith("/"):
+            return OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id,
+                content="权限不足：此命令需要主人授权。",
+                metadata=msg.metadata or {},
+            )
+
         session = self.sessions.get_or_create(key)
 
         # Slash commands
@@ -462,7 +476,8 @@ class AgentLoop:
                 content="\n".join(lines),
                 metadata={"render_as": "text"},
             )
-        await self.memory_consolidator.maybe_consolidate_by_tokens(session)
+        if not msg.metadata.get("guest_mode"):
+            await self.memory_consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
@@ -475,6 +490,7 @@ class AgentLoop:
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            guest_mode=msg.metadata.get("guest_mode", False),
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -487,14 +503,16 @@ class AgentLoop:
 
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
+            metadata=msg.metadata,
         )
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
         self._save_turn(session, all_msgs, 1 + len(history))
-        self.sessions.save(session)
-        self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
+        if not msg.metadata.get("guest_mode"):
+            self.sessions.save(session)
+            self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None

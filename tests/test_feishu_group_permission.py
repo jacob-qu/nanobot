@@ -1,10 +1,13 @@
 """Tests for Feishu group safety features (permissions, context buffer, guest mode)."""
+import asyncio
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.loop import AgentLoop
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu import FeishuChannel, FeishuConfig
 
@@ -189,3 +192,170 @@ def test_build_messages_guest_mode_passes_through() -> None:
     system_content = msgs[0]["content"]
     assert "群聊" in system_content
     assert "workspace" not in system_content.lower()
+
+
+# ── Task 5: Agent loop guest mode ─────────────────────────────────────────────
+
+
+def _make_loop() -> AgentLoop:
+    loop = AgentLoop.__new__(AgentLoop)
+    loop._TOOL_RESULT_MAX_CHARS = AgentLoop._TOOL_RESULT_MAX_CHARS
+    loop.sessions = MagicMock()
+    loop.sessions.get_or_create.return_value = MagicMock(messages=[], last_consolidated=0)
+    loop.sessions.save = MagicMock()
+    loop.context = MagicMock()
+    loop.context.build_messages.return_value = [{"role": "user", "content": "hi"}]
+    loop.tools = MagicMock()
+    loop.memory_consolidator = MagicMock()
+    loop.memory_consolidator.maybe_consolidate_by_tokens = AsyncMock()
+    loop.bus = MagicMock()
+    loop.bus.publish_outbound = AsyncMock()
+    loop._active_tasks = {}
+    loop._background_tasks = []
+    loop._set_tool_context = MagicMock()
+    loop._schedule_background = MagicMock()
+    loop._run_agent_loop = AsyncMock(return_value=("hello", [], []))
+    loop.subagents = MagicMock()
+    return loop
+
+
+def test_guest_slash_command_is_blocked() -> None:
+    lp = _make_loop()
+    msg = InboundMessage(
+        channel="feishu", sender_id="ou_stranger", chat_id="oc_group1",
+        content="/restart",
+        metadata={"guest_mode": True},
+    )
+    result = asyncio.get_event_loop().run_until_complete(lp._process_message(msg))
+    assert result is not None
+    assert "权限不足" in result.content
+    lp._run_agent_loop.assert_not_called()
+
+
+def test_guest_session_not_saved() -> None:
+    lp = _make_loop()
+    msg = InboundMessage(
+        channel="feishu", sender_id="ou_stranger", chat_id="oc_group1",
+        content="hello",
+        metadata={"guest_mode": True},
+    )
+    asyncio.get_event_loop().run_until_complete(lp._process_message(msg))
+    lp.sessions.save.assert_not_called()
+
+
+def test_guest_consolidation_skipped() -> None:
+    lp = _make_loop()
+    msg = InboundMessage(
+        channel="feishu", sender_id="ou_stranger", chat_id="oc_group1",
+        content="hello",
+        metadata={"guest_mode": True},
+    )
+    asyncio.get_event_loop().run_until_complete(lp._process_message(msg))
+    lp.memory_consolidator.maybe_consolidate_by_tokens.assert_not_called()
+
+
+def test_owner_session_saved_normally() -> None:
+    lp = _make_loop()
+    lp.sessions.get_or_create.return_value = MagicMock(
+        messages=[], last_consolidated=0, key="feishu:oc_group1"
+    )
+    msg = InboundMessage(
+        channel="feishu", sender_id="ou_owner", chat_id="oc_group1",
+        content="hello",
+        metadata={"guest_mode": False},
+    )
+    asyncio.get_event_loop().run_until_complete(lp._process_message(msg))
+    lp.sessions.save.assert_called_once()
+
+
+def test_tool_guard_blocks_sensitive_tool_for_guest() -> None:
+    lp = AgentLoop.__new__(AgentLoop)
+    lp.max_iterations = 1
+    lp.model = None
+    lp.context = MagicMock()
+    lp.context.add_assistant_message = MagicMock(side_effect=lambda msgs, *a, **kw: msgs)
+    lp.context.add_tool_result = MagicMock(side_effect=lambda msgs, *a, **kw: msgs)
+    lp.tools = MagicMock()
+    lp.tools.get_definitions.return_value = []
+    lp.tools.execute = AsyncMock(return_value="file content")
+
+    # Mock provider returning a tool call for read_file
+    tool_call = MagicMock()
+    tool_call.name = "read_file"
+    tool_call.id = "tc1"
+    tool_call.arguments = {"path": "/secret"}
+    tool_call.to_openai_tool_call.return_value = {}
+
+    response_with_tool = MagicMock()
+    response_with_tool.has_tool_calls = True
+    response_with_tool.content = None
+    response_with_tool.reasoning_content = None
+    response_with_tool.thinking_blocks = None
+    response_with_tool.tool_calls = [tool_call]
+
+    response_final = MagicMock()
+    response_final.has_tool_calls = False
+    response_final.content = "done"
+    response_final.finish_reason = "stop"
+    response_final.reasoning_content = None
+    response_final.thinking_blocks = None
+
+    lp.provider = MagicMock()
+    lp.provider.chat_with_retry = AsyncMock(side_effect=[response_with_tool, response_final])
+
+    messages = [{"role": "user", "content": "read my files"}]
+    metadata = {"guest_mode": True, "guest_allowed_tools": ["web_search", "web_fetch"]}
+
+    asyncio.get_event_loop().run_until_complete(
+        lp._run_agent_loop(messages, metadata=metadata)
+    )
+
+    # tools.execute should NOT have been called (guard intercepted)
+    lp.tools.execute.assert_not_called()
+    # tool result should contain 权限不足
+    call_args = lp.context.add_tool_result.call_args
+    assert "权限不足" in call_args[0][3]  # result argument
+
+
+def test_tool_guard_allows_safe_tool_for_guest() -> None:
+    lp = AgentLoop.__new__(AgentLoop)
+    lp.max_iterations = 1
+    lp.model = None
+    lp.context = MagicMock()
+    lp.context.add_assistant_message = MagicMock(side_effect=lambda msgs, *a, **kw: msgs)
+    lp.context.add_tool_result = MagicMock(side_effect=lambda msgs, *a, **kw: msgs)
+    lp.tools = MagicMock()
+    lp.tools.get_definitions.return_value = []
+    lp.tools.execute = AsyncMock(return_value="search results")
+
+    tool_call = MagicMock()
+    tool_call.name = "web_search"
+    tool_call.id = "tc2"
+    tool_call.arguments = {"query": "hello"}
+    tool_call.to_openai_tool_call.return_value = {}
+
+    response_with_tool = MagicMock()
+    response_with_tool.has_tool_calls = True
+    response_with_tool.content = None
+    response_with_tool.reasoning_content = None
+    response_with_tool.thinking_blocks = None
+    response_with_tool.tool_calls = [tool_call]
+
+    response_final = MagicMock()
+    response_final.has_tool_calls = False
+    response_final.content = "here are results"
+    response_final.finish_reason = "stop"
+    response_final.reasoning_content = None
+    response_final.thinking_blocks = None
+
+    lp.provider = MagicMock()
+    lp.provider.chat_with_retry = AsyncMock(side_effect=[response_with_tool, response_final])
+
+    messages = [{"role": "user", "content": "search something"}]
+    metadata = {"guest_mode": True, "guest_allowed_tools": ["web_search", "web_fetch"]}
+
+    asyncio.get_event_loop().run_until_complete(
+        lp._run_agent_loop(messages, metadata=metadata)
+    )
+
+    lp.tools.execute.assert_called_once_with("web_search", {"query": "hello"})
