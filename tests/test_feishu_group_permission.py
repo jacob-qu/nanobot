@@ -1,4 +1,5 @@
 """Tests for Feishu group safety features (permissions, context buffer, guest mode)."""
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from nanobot.bus.queue import MessageBus
@@ -88,8 +89,6 @@ def test_build_group_context_str_empty() -> None:
     ch = _make_channel()
     assert ch._build_group_context_str("nonexistent") == ""
 
-
-from types import SimpleNamespace
 
 
 def _make_mention(open_id="ou_bot", user_id=None):
