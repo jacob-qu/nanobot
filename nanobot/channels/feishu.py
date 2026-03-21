@@ -432,11 +432,15 @@ class FeishuChannel(BaseChannel):
                     return True
         return False
 
-    def _is_group_message_for_bot(self, message: Any) -> bool:
-        """Allow group messages when policy is open or bot is @mentioned."""
+    def _is_group_message_for_bot(self, message: Any, text: str = "") -> bool:
+        """Return True if bot should respond to this group message."""
+        if self._is_bot_mentioned(message):
+            return True
+        if self.config.group_policy == "heuristic" and self.config.heuristic_keywords:
+            return any(kw in text for kw in self.config.heuristic_keywords)
         if self.config.group_policy == "open":
             return True
-        return self._is_bot_mentioned(message)
+        return False
 
     def _fetch_bot_open_id_sync(self) -> str | None:
         """Fetch the bot's own open_id from the Feishu API (synchronous)."""
@@ -1125,8 +1129,21 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type
             msg_type = message.message_type
 
-            if chat_type == "group" and not self._is_group_message_for_bot(message):
-                logger.debug("Feishu: skipping group message (not mentioned)")
+            # Early plain text extract for group context buffer and heuristic matching
+            # (lightweight, only for text messages; full content parse happens below)
+            plain_text = ""
+            if chat_type == "group" and msg_type == "text":
+                try:
+                    plain_text = json.loads(message.content or "{}").get("text", "")
+                except (json.JSONDecodeError, TypeError):
+                    plain_text = ""
+
+            # Buffer ALL group messages before trigger check
+            if chat_type == "group":
+                self._append_group_context(chat_id, sender_id, plain_text or f"[{msg_type}]")
+
+            if chat_type == "group" and not self._is_group_message_for_bot(message, plain_text):
+                logger.debug("Feishu: skipping group message (not mentioned/triggered)")
                 return
 
             # Add reaction
@@ -1195,6 +1212,12 @@ class FeishuChannel(BaseChannel):
 
             content = "\n".join(content_parts) if content_parts else ""
 
+            # Prepend group context for bot responses
+            if chat_type == "group":
+                ctx = self._build_group_context_str(chat_id)
+                if ctx:
+                    content = f"{ctx}\n\n{content}" if content else ctx
+
             if not content and not media_paths:
                 return
 
@@ -1210,6 +1233,12 @@ class FeishuChannel(BaseChannel):
                     "chat_type": chat_type,
                     "msg_type": msg_type,
                     "parent_id": parent_id,
+                    "guest_mode": chat_type == "group" and sender_id not in self.config.owner_open_ids,
+                    "guest_allowed_tools": (
+                        self.config.guest_allowed_tools
+                        if chat_type == "group" and sender_id not in self.config.owner_open_ids
+                        else None
+                    ),
                     "root_id": root_id,
                 }
             )

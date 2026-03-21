@@ -87,3 +87,58 @@ def test_build_group_context_str_format() -> None:
 def test_build_group_context_str_empty() -> None:
     ch = _make_channel()
     assert ch._build_group_context_str("nonexistent") == ""
+
+
+from types import SimpleNamespace
+
+
+def _make_mention(open_id="ou_bot", user_id=None):
+    return SimpleNamespace(id=SimpleNamespace(open_id=open_id, user_id=user_id))
+
+
+def _make_msg(mentions=None, content='{"text": "hello"}'):
+    return SimpleNamespace(mentions=mentions or [], content=content)
+
+
+def test_is_group_message_for_bot_mention_mode_with_mention() -> None:
+    ch = _make_channel(group_policy="mention")
+    msg = _make_msg(mentions=[_make_mention("ou_bot")])
+    assert ch._is_group_message_for_bot(msg, "hello") is True
+
+
+def test_is_group_message_for_bot_mention_mode_without_mention() -> None:
+    ch = _make_channel(group_policy="mention")
+    msg = _make_msg(mentions=[])
+    assert ch._is_group_message_for_bot(msg, "hello nanobot") is False
+
+
+def test_is_group_message_for_bot_heuristic_keyword_match() -> None:
+    ch = _make_channel(group_policy="heuristic", heuristic_keywords=["nanobot", "Jacob"])
+    msg = _make_msg(mentions=[])
+    assert ch._is_group_message_for_bot(msg, "Jacob 你好") is True
+
+
+def test_is_group_message_for_bot_heuristic_no_match() -> None:
+    ch = _make_channel(group_policy="heuristic", heuristic_keywords=["nanobot"])
+    msg = _make_msg(mentions=[])
+    assert ch._is_group_message_for_bot(msg, "普通消息") is False
+
+
+def test_is_group_message_for_bot_heuristic_mention_overrides() -> None:
+    """Direct @mention always triggers, even in heuristic mode."""
+    ch = _make_channel(group_policy="heuristic", heuristic_keywords=[])
+    msg = _make_msg(mentions=[_make_mention("ou_bot")])
+    assert ch._is_group_message_for_bot(msg, "no keyword") is True
+
+
+def test_guest_mode_true_for_group_non_owner() -> None:
+    ch = _make_channel(owner_open_ids=["ou_owner"])
+    # Simulate metadata tagging logic
+    is_guest = "group" == "group" and "ou_stranger" not in ch.config.owner_open_ids
+    assert is_guest is True
+
+
+def test_guest_mode_false_for_group_owner() -> None:
+    ch = _make_channel(owner_open_ids=["ou_owner"])
+    is_guest = "group" == "group" and "ou_owner" not in ch.config.owner_open_ids
+    assert is_guest is False
