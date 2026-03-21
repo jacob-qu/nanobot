@@ -1,4 +1,4 @@
-"""Tests for Feishu group safety: permissions, context buffer, guest mode."""
+"""Tests for Feishu group safety features (permissions, context buffer, guest mode)."""
 from nanobot.channels.feishu import FeishuConfig
 
 
