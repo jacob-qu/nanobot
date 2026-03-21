@@ -284,6 +284,7 @@ class FeishuChannel(BaseChannel):
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
         self._bot_open_id: str | None = None
+        self._group_context: dict[str, list[tuple[str, str]]] = {}
 
     @staticmethod
     def _register_optional_event(builder: Any, method_name: str, handler: Any) -> Any:
@@ -385,6 +386,30 @@ class FeishuChannel(BaseChannel):
         """
         self._running = False
         logger.info("Feishu bot stopped")
+
+    @staticmethod
+    def _estimate_tokens(buf: list[tuple[str, str]]) -> int:
+        """Estimate token count for context buffer (2 chars ≈ 1 token)."""
+        return sum(len(text) for _, text in buf) // 2
+
+    def _append_group_context(self, chat_id: str, sender: str, text: str) -> None:
+        """Append message to group context buffer, trimming oldest when over 80% token limit."""
+        buf = self._group_context.setdefault(chat_id, [])
+        buf.append((sender, text))
+        threshold = int(self.config.group_context_max_tokens * 0.8)
+        while len(buf) > 1 and self._estimate_tokens(buf) > threshold:
+            buf.pop(0)
+
+    def _build_group_context_str(self, chat_id: str) -> str:
+        """Build a formatted group context string to prepend to bot messages."""
+        buf = self._group_context.get(chat_id)
+        if not buf:
+            return ""
+        lines = ["[群聊上下文]"]
+        for sender, text in buf:
+            lines.append(f"{sender}: {text}")
+        lines.append("---")
+        return "\n".join(lines)
 
     def _is_bot_mentioned(self, message: Any) -> bool:
         """Check if the bot is @mentioned in the message."""
