@@ -150,8 +150,8 @@ def test_guest_mode_false_for_group_owner() -> None:
 
 
 def _make_context() -> ContextBuilder:
-    with tempfile.TemporaryDirectory() as d:
-        return ContextBuilder(Path(d))
+    d = tempfile.mkdtemp()
+    return ContextBuilder(Path(d))
 
 
 def test_guest_mode_system_prompt_is_minimal() -> None:
