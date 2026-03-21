@@ -24,8 +24,11 @@ class ContextBuilder:
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(self, skill_names: list[str] | None = None, guest_mode: bool = False) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        if guest_mode:
+            return self._get_guest_identity()
+
         parts = [self._get_identity()]
 
         bootstrap = self._load_bootstrap_files()
@@ -99,6 +102,15 @@ Your workspace is at: {workspace_path}
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
     @staticmethod
+    def _get_guest_identity() -> str:
+        """Minimal identity for group chat guests."""
+        return """# nanobot 🐈
+
+你是 nanobot，一个 AI 助手。你正在飞书群聊中与大家对话。
+你可以进行一般问答、搜索网络信息、生成内容等互动。
+你无法执行管理操作（如安装 skill、修改配置、操作文件），如有此类请求，请直接说明需要联系主人处理。"""
+
+    @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
         """Build untrusted runtime metadata block for injection before the user message."""
         lines = [f"Current Time: {current_time_str()}"]
@@ -127,6 +139,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         channel: str | None = None,
         chat_id: str | None = None,
         current_role: str = "user",
+        guest_mode: bool = False,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         runtime_ctx = self._build_runtime_context(channel, chat_id)
@@ -140,7 +153,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": self.build_system_prompt(skill_names, guest_mode=guest_mode)},
             *history,
             {"role": current_role, "content": merged},
         ]

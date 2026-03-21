@@ -1,7 +1,10 @@
 """Tests for Feishu group safety features (permissions, context buffer, guest mode)."""
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from nanobot.agent.context import ContextBuilder
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu import FeishuChannel, FeishuConfig
 
@@ -141,3 +144,48 @@ def test_guest_mode_false_for_group_owner() -> None:
     ch = _make_channel(owner_open_ids=["ou_owner"])
     is_guest = "group" == "group" and "ou_owner" not in ch.config.owner_open_ids
     assert is_guest is False
+
+
+# ── Task 4: guest_mode system prompt ─────────────────────────────────────────
+
+
+def _make_context() -> ContextBuilder:
+    with tempfile.TemporaryDirectory() as d:
+        return ContextBuilder(Path(d))
+
+
+def test_guest_mode_system_prompt_is_minimal() -> None:
+    ctx = _make_context()
+    prompt = ctx.build_system_prompt(guest_mode=True)
+    assert "nanobot" in prompt
+    assert "群聊" in prompt
+    # Must NOT contain workspace path info
+    assert "workspace" not in prompt.lower()
+    assert "memory" not in prompt.lower()
+
+
+def test_guest_mode_system_prompt_excludes_bootstrap() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d)
+        (p / "SOUL.md").write_text("SECRET_SOUL_CONTENT", encoding="utf-8")
+        ctx = ContextBuilder(p)
+        prompt = ctx.build_system_prompt(guest_mode=True)
+        assert "SECRET_SOUL_CONTENT" not in prompt
+
+
+def test_normal_mode_system_prompt_has_workspace() -> None:
+    ctx = _make_context()
+    prompt = ctx.build_system_prompt(guest_mode=False)
+    assert "Workspace" in prompt
+
+
+def test_build_messages_guest_mode_passes_through() -> None:
+    ctx = _make_context()
+    msgs = ctx.build_messages(
+        history=[],
+        current_message="hello",
+        guest_mode=True,
+    )
+    system_content = msgs[0]["content"]
+    assert "群聊" in system_content
+    assert "workspace" not in system_content.lower()
