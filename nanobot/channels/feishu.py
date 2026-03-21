@@ -246,8 +246,12 @@ class FeishuConfig(Base):
     verification_token: str = ""
     allow_from: list[str] = Field(default_factory=list)
     react_emoji: str = "THUMBSUP"
-    group_policy: Literal["open", "mention"] = "mention"
+    group_policy: Literal["open", "mention", "heuristic"] = "mention"
     reply_to_message: bool = False  # If True, bot replies quote the user's original message
+    owner_open_ids: list[str] = Field(default_factory=list)
+    heuristic_keywords: list[str] = Field(default_factory=list)
+    group_context_max_tokens: int = 8192
+    guest_allowed_tools: list[str] = Field(default_factory=lambda: ["web_search", "web_fetch"])
 
 
 class FeishuChannel(BaseChannel):
