@@ -59,10 +59,10 @@ async def test_run_lark_cli_success(mock_subprocess):
     try:
         result = await run_lark_cli("calendar", "+agenda")
         assert result == '{"items": []}'
-        # Verify --output json and --as user are appended
+        # Verify --format json and --as user are appended
         call_args = mock.call_args[0]
         assert any("lark-cli" in a for a in call_args)
-        assert "--output" in call_args
+        assert "--format" in call_args
         assert "json" in call_args
         assert "--as" in call_args
         assert "user" in call_args
