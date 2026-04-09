@@ -11,9 +11,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 from asyncio.subprocess import PIPE
 from datetime import date, timedelta
+
+# Fix PATH for launchd environments where homebrew paths are missing
+_extra_paths = [
+    "/opt/homebrew/opt/node@22/bin",  # node binary (keg-only, not symlinked)
+    "/opt/homebrew/bin",               # lark-cli and other homebrew binaries
+]
+_current = os.environ.get("PATH", "")
+_current_parts = _current.split(":")
+_missing = [p for p in _extra_paths if p not in _current_parts]
+if _missing:
+    os.environ["PATH"] = ":".join(_missing) + ":" + _current
 
 from mcp.server.fastmcp import FastMCP
 
@@ -34,7 +46,7 @@ async def run_lark_cli(*args: str, timeout: int = 25) -> str:
     if not lark_cli:
         return "Error: lark-cli is not installed. Run: npm install -g @larksuite/cli"
 
-    cmd = [lark_cli, *args, "--output", "json", "--as", "user"]
+    cmd = [lark_cli, *args, "--format", "json", "--as", "user"]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
