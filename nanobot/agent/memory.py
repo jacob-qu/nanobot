@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sqlite3
 import weakref
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,7 @@ class MemoryStore:
         self._git = GitStore(workspace, tracked_files=[
             "SOUL.md", "USER.md", "memory/MEMORY.md",
         ])
+        self._db: sqlite3.Connection | None = None
         self._maybe_migrate_legacy_history()
 
     @property
@@ -188,6 +190,55 @@ class MemoryStore:
             suffix += 1
         return candidate
 
+    # -- SQLite backend -------------------------------------------------------
+
+    _CJK_RE = re.compile(r"([\u4e00-\u9fff\u3400-\u4dbf])")
+
+    @staticmethod
+    def _cjk_space(text: str) -> str:
+        """Insert spaces around CJK characters so FTS5 unicode61 tokenizes them."""
+        return MemoryStore._CJK_RE.sub(r" \1 ", text).strip()
+
+    def _get_db(self) -> sqlite3.Connection:
+        """Lazily initialize and return the SQLite connection."""
+        if self._db is None:
+            db_path = self.memory_dir / "history.db"
+            self._db = sqlite3.connect(str(db_path), check_same_thread=False)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA foreign_keys=ON")
+            self._db.row_factory = sqlite3.Row
+            self._init_db()
+        return self._db
+
+    def _init_db(self) -> None:
+        """Create tables and triggers if they don't exist."""
+        db = self._db
+        assert db is not None
+        db.executescript("""
+            CREATE TABLE IF NOT EXISTS history (
+                cursor     INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp  TEXT    NOT NULL,
+                content    TEXT    NOT NULL,
+                source     TEXT    NOT NULL DEFAULT 'consolidator',
+                created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+            );
+            CREATE TABLE IF NOT EXISTS metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO metadata (key, value) VALUES ('dream_cursor', '0');
+        """)
+        try:
+            db.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(
+                    content,
+                    tokenize='unicode61 remove_diacritics 2'
+                )
+            """)
+        except sqlite3.OperationalError:
+            pass
+        db.commit()
+
     # -- MEMORY.md (long-term facts) -----------------------------------------
 
     def read_memory(self) -> str:
@@ -218,99 +269,114 @@ class MemoryStore:
         long_term = self.read_memory()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
-    # -- history.jsonl — append-only, JSONL format ---------------------------
+    # -- history — append-only, SQLite-backed ---------------------------------
 
-    def append_history(self, entry: str) -> int:
-        """Append *entry* to history.jsonl and return its auto-incrementing cursor."""
-        cursor = self._next_cursor()
+    def append_history(self, entry: str, source: str = "consolidator") -> int:
+        """Append *entry* to history and return its auto-incrementing cursor."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        record = {"cursor": cursor, "timestamp": ts, "content": strip_think(entry.rstrip()) or entry.rstrip()}
-        with open(self.history_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._cursor_file.write_text(str(cursor), encoding="utf-8")
-        return cursor
-
-    def _next_cursor(self) -> int:
-        """Read the current cursor counter and return next value."""
-        if self._cursor_file.exists():
-            try:
-                return int(self._cursor_file.read_text(encoding="utf-8").strip()) + 1
-            except (ValueError, OSError):
-                pass
-        # Fallback: read last line's cursor from the JSONL file.
-        last = self._read_last_entry()
-        if last and last.get("cursor"):
-            return last["cursor"] + 1
-        return 1
+        content = strip_think(entry.rstrip()) or entry.rstrip()
+        db = self._get_db()
+        cur = db.execute(
+            "INSERT INTO history (timestamp, content, source) VALUES (?, ?, ?)",
+            (ts, content, source),
+        )
+        rowid = cur.lastrowid
+        db.execute(
+            "INSERT INTO history_fts(rowid, content) VALUES (?, ?)",
+            (rowid, self._cjk_space(content)),
+        )
+        db.commit()
+        return rowid
 
     def read_unprocessed_history(self, since_cursor: int) -> list[dict[str, Any]]:
         """Return history entries with cursor > *since_cursor*."""
-        return [e for e in self._read_entries() if e.get("cursor", 0) > since_cursor]
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT cursor, timestamp, content FROM history WHERE cursor > ? ORDER BY cursor",
+            (since_cursor,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def compact_history(self) -> None:
-        """Drop oldest entries if the file exceeds *max_history_entries*."""
+        """Drop oldest entries if the table exceeds *max_history_entries*."""
         if self.max_history_entries <= 0:
             return
-        entries = self._read_entries()
-        if len(entries) <= self.max_history_entries:
+        db = self._get_db()
+        count = db.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+        if count <= self.max_history_entries:
             return
-        kept = entries[-self.max_history_entries:]
-        self._write_entries(kept)
-
-    # -- JSONL helpers -------------------------------------------------------
-
-    def _read_entries(self) -> list[dict[str, Any]]:
-        """Read all entries from history.jsonl."""
-        entries: list[dict[str, Any]] = []
-        try:
-            with open(self.history_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            entries.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            continue
-        except FileNotFoundError:
-            pass
-        return entries
-
-    def _read_last_entry(self) -> dict[str, Any] | None:
-        """Read the last entry from the JSONL file efficiently."""
-        try:
-            with open(self.history_file, "rb") as f:
-                f.seek(0, 2)
-                size = f.tell()
-                if size == 0:
-                    return None
-                read_size = min(size, 4096)
-                f.seek(size - read_size)
-                data = f.read().decode("utf-8")
-                lines = [l for l in data.split("\n") if l.strip()]
-                if not lines:
-                    return None
-                return json.loads(lines[-1])
-        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
-            return None
-
-    def _write_entries(self, entries: list[dict[str, Any]]) -> None:
-        """Overwrite history.jsonl with the given entries."""
-        with open(self.history_file, "w", encoding="utf-8") as f:
-            for entry in entries:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # Identify rows to delete and remove from FTS index
+        to_delete = db.execute(
+            "SELECT cursor FROM history WHERE cursor < ("
+            "  SELECT cursor FROM history ORDER BY cursor DESC LIMIT 1 OFFSET ?"
+            ")",
+            (self.max_history_entries - 1,),
+        ).fetchall()
+        for row in to_delete:
+            db.execute("DELETE FROM history_fts WHERE rowid = ?", (row[0],))
+        db.execute(
+            "DELETE FROM history WHERE cursor < ("
+            "  SELECT cursor FROM history ORDER BY cursor DESC LIMIT 1 OFFSET ?"
+            ")",
+            (self.max_history_entries - 1,),
+        )
+        db.commit()
 
     # -- dream cursor --------------------------------------------------------
 
     def get_last_dream_cursor(self) -> int:
-        if self._dream_cursor_file.exists():
+        db = self._get_db()
+        row = db.execute("SELECT value FROM metadata WHERE key = 'dream_cursor'").fetchone()
+        if row:
             try:
-                return int(self._dream_cursor_file.read_text(encoding="utf-8").strip())
-            except (ValueError, OSError):
+                return int(row[0])
+            except (ValueError, TypeError):
                 pass
         return 0
 
     def set_last_dream_cursor(self, cursor: int) -> None:
-        self._dream_cursor_file.write_text(str(cursor), encoding="utf-8")
+        db = self._get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('dream_cursor', ?)",
+            (str(cursor),),
+        )
+        db.commit()
+
+    def search_history(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """FTS5 full-text search over history entries."""
+        limit = min(max(1, limit), 20)
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT h.cursor, h.timestamp, h.content, rank "
+            "FROM history_fts fts "
+            "JOIN history h ON h.cursor = fts.rowid "
+            "WHERE history_fts MATCH ? "
+            "ORDER BY rank "
+            "LIMIT ?",
+            (self._cjk_space(query), limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_history(self, since: str | None = None, until: str | None = None,
+                      limit: int = 50) -> list[dict[str, Any]]:
+        """Query history entries by time range."""
+        limit = min(max(1, limit), 200)
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        db = self._get_db()
+        rows = db.execute(
+            f"SELECT cursor, timestamp, content FROM history{where} ORDER BY cursor DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- message formatting utility ------------------------------------------
 

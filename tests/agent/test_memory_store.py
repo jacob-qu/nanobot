@@ -53,11 +53,11 @@ class TestHistoryWithCursor:
         cursor2 = store.append_history("event 2")
         assert cursor2 == 2
 
-    def test_append_history_includes_cursor_in_file(self, store):
+    def test_append_history_stores_cursor_in_db(self, store):
         store.append_history("event 1")
-        content = store.read_file(store.history_file)
-        data = json.loads(content)
-        assert data["cursor"] == 1
+        entries = store.read_unprocessed_history(since_cursor=0)
+        assert len(entries) == 1
+        assert entries[0]["cursor"] == 1
 
     def test_cursor_persists_across_appends(self, store):
         store.append_history("event 1")
@@ -288,3 +288,108 @@ class TestLegacyHistoryMigration:
         assert entries[0]["timestamp"] == "2026-04-01 10:00"
         assert "Broken" in entries[0]["content"]
         assert "migration." in entries[0]["content"]
+
+
+class TestSQLiteBackend:
+    """Tests for SQLite-backed history storage."""
+
+    def test_append_history_returns_cursor(self, store):
+        cursor = store.append_history("event 1")
+        assert cursor == 1
+        cursor2 = store.append_history("event 2")
+        assert cursor2 == 2
+
+    def test_history_db_file_created(self, store):
+        store.append_history("event 1")
+        assert (store.memory_dir / "history.db").exists()
+
+    def test_read_unprocessed_history(self, store):
+        store.append_history("event 1")
+        store.append_history("event 2")
+        store.append_history("event 3")
+        entries = store.read_unprocessed_history(since_cursor=1)
+        assert len(entries) == 2
+        assert entries[0]["cursor"] == 2
+
+    def test_compact_history_drops_oldest(self, tmp_path):
+        s = MemoryStore(tmp_path, max_history_entries=2)
+        for i in range(5):
+            s.append_history(f"event {i+1}")
+        s.compact_history()
+        entries = s.read_unprocessed_history(since_cursor=0)
+        assert len(entries) == 2
+        assert entries[0]["cursor"] == 4
+
+    def test_dream_cursor_via_metadata_table(self, store):
+        assert store.get_last_dream_cursor() == 0
+        store.set_last_dream_cursor(5)
+        assert store.get_last_dream_cursor() == 5
+
+    def test_dream_cursor_persists_across_instances(self, store):
+        store.set_last_dream_cursor(3)
+        store2 = MemoryStore(store.workspace)
+        assert store2.get_last_dream_cursor() == 3
+
+    def test_no_jsonl_file_created(self, store):
+        """After SQLite upgrade, history.jsonl should NOT be created for new workspaces."""
+        store.append_history("event 1")
+        assert not store.history_file.exists()
+
+
+class TestFTS5Search:
+    """Tests for full-text search via FTS5."""
+
+    def test_search_history_basic(self, store):
+        store.append_history("用户请求编写自动部署脚本")
+        store.append_history("修复登录页面的 CSS 样式问题")
+        store.append_history("讨论部署流水线的优化方案")
+        results = store.search_history("部署")
+        assert len(results) >= 2
+        contents = [r["content"] for r in results]
+        assert any("部署脚本" in c for c in contents)
+        assert any("部署流水线" in c for c in contents)
+
+    def test_search_history_english(self, store):
+        store.append_history("Fixed the authentication bug in login flow")
+        store.append_history("Added new CSS styles for dashboard")
+        results = store.search_history("authentication")
+        assert len(results) == 1
+        assert "authentication" in results[0]["content"]
+
+    def test_search_history_returns_ranked(self, store):
+        store.append_history("部署脚本第一版")
+        store.append_history("完全无关的内容")
+        results = store.search_history("部署")
+        assert len(results) == 1
+        assert "rank" in results[0]
+
+    def test_search_history_respects_limit(self, store):
+        for i in range(10):
+            store.append_history(f"测试条目 {i}")
+        results = store.search_history("测试", limit=3)
+        assert len(results) == 3
+
+    def test_search_history_empty_result(self, store):
+        store.append_history("some content")
+        results = store.search_history("不存在的关键词xyz")
+        assert results == []
+
+    def test_search_history_empty_db(self, store):
+        results = store.search_history("anything")
+        assert results == []
+
+
+class TestQueryHistory:
+    """Tests for time-range queries."""
+
+    def test_query_history_all(self, store):
+        store.append_history("event 1")
+        store.append_history("event 2")
+        results = store.query_history()
+        assert len(results) == 2
+
+    def test_query_history_with_limit(self, store):
+        for i in range(10):
+            store.append_history(f"event {i}")
+        results = store.query_history(limit=3)
+        assert len(results) == 3
