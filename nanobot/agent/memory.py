@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 class MemoryStore:
-    """Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
+    """Pure file I/O for memory files: MEMORY.md, history (SQLite), SOUL.md, USER.md."""
 
     _DEFAULT_MAX_HISTORY = 1000
     _LEGACY_ENTRY_START_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}[^\]]*)\]\s*")
@@ -54,7 +54,8 @@ class MemoryStore:
             "SOUL.md", "USER.md", "memory/MEMORY.md",
         ])
         self._db: sqlite3.Connection | None = None
-        self._maybe_migrate_legacy_history()
+        self._maybe_migrate_legacy_history()   # HISTORY.md → SQLite
+        self._maybe_migrate_jsonl_to_sqlite()  # history.jsonl → SQLite
 
     @property
     def git(self) -> GitStore:
@@ -70,14 +71,12 @@ class MemoryStore:
             return ""
 
     def _maybe_migrate_legacy_history(self) -> None:
-        """One-time upgrade from legacy HISTORY.md to history.jsonl.
-
-        The migration is best-effort and prioritizes preserving as much content
-        as possible over perfect parsing.
-        """
+        """One-time upgrade from legacy HISTORY.md directly to SQLite."""
         if not self.legacy_history_file.exists():
             return
-        if self.history_file.exists() and self.history_file.stat().st_size > 0:
+        # Skip if SQLite already has data
+        db_path = self.memory_dir / "history.db"
+        if db_path.exists() and db_path.stat().st_size > 0:
             return
 
         try:
@@ -92,18 +91,28 @@ class MemoryStore:
         entries = self._parse_legacy_history(legacy_text)
         try:
             if entries:
-                self._write_entries(entries)
+                db = self._get_db()
+                db.executemany(
+                    "INSERT OR IGNORE INTO history (cursor, timestamp, content)"
+                    " VALUES (?, ?, ?)",
+                    [(e["cursor"], e["timestamp"], e["content"]) for e in entries],
+                )
+                # Populate FTS with CJK-spaced content
+                db.execute("DELETE FROM history_fts")
+                rows = db.execute("SELECT cursor, content FROM history").fetchall()
+                for row in rows:
+                    db.execute(
+                        "INSERT INTO history_fts(rowid, content) VALUES (?, ?)",
+                        (row[0], self._cjk_space(row[1])),
+                    )
                 last_cursor = entries[-1]["cursor"]
-                self._cursor_file.write_text(str(last_cursor), encoding="utf-8")
-                # Default to "already processed" so upgrades do not replay the
-                # user's entire historical archive into Dream on first start.
-                self._dream_cursor_file.write_text(str(last_cursor), encoding="utf-8")
+                self.set_last_dream_cursor(last_cursor)
+                db.commit()
 
             backup_path = self._next_legacy_backup_path()
             self.legacy_history_file.replace(backup_path)
             logger.info(
-                "Migrated legacy HISTORY.md to history.jsonl ({} entries)",
-                len(entries),
+                "Migrated legacy HISTORY.md to SQLite ({} entries)", len(entries),
             )
         except Exception:
             logger.exception("Failed to migrate legacy HISTORY.md")
@@ -190,6 +199,69 @@ class MemoryStore:
             suffix += 1
         return candidate
 
+    def _maybe_migrate_jsonl_to_sqlite(self) -> None:
+        """One-time migration: history.jsonl → SQLite."""
+        db_path = self.memory_dir / "history.db"
+        if db_path.exists() and db_path.stat().st_size > 0:
+            return
+        if not self.history_file.exists():
+            return
+
+        try:
+            entries: list[dict[str, Any]] = []
+            with open(self.history_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+            if not entries:
+                return
+
+            dream_cursor = 0
+            if self._dream_cursor_file.exists():
+                try:
+                    dream_cursor = int(
+                        self._dream_cursor_file.read_text(encoding="utf-8").strip()
+                    )
+                except (ValueError, OSError):
+                    pass
+
+            db = self._get_db()
+            db.executemany(
+                "INSERT OR IGNORE INTO history (cursor, timestamp, content)"
+                " VALUES (?, ?, ?)",
+                [(e["cursor"], e["timestamp"], e["content"]) for e in entries],
+            )
+            # Rebuild FTS with CJK-spaced content
+            db.execute("DELETE FROM history_fts")
+            rows = db.execute("SELECT cursor, content FROM history").fetchall()
+            for row in rows:
+                db.execute(
+                    "INSERT INTO history_fts(rowid, content) VALUES (?, ?)",
+                    (row[0], self._cjk_space(row[1])),
+                )
+            db.execute(
+                "INSERT OR REPLACE INTO metadata (key, value)"
+                " VALUES ('dream_cursor', ?)",
+                (str(dream_cursor),),
+            )
+            db.commit()
+
+            backup = self.history_file.with_suffix(".jsonl.bak")
+            self.history_file.rename(backup)
+            for f in (self._cursor_file, self._dream_cursor_file):
+                if f.exists():
+                    f.unlink()
+            logger.info(
+                "Migrated history.jsonl to SQLite ({} entries, dream_cursor={})",
+                len(entries), dream_cursor,
+            )
+        except Exception:
+            logger.exception("Failed to migrate history.jsonl to SQLite — keeping original")
+
     # -- SQLite backend -------------------------------------------------------
 
     _CJK_RE = re.compile(r"([\u4e00-\u9fff\u3400-\u4dbf])")
@@ -236,7 +308,7 @@ class MemoryStore:
                 )
             """)
         except sqlite3.OperationalError:
-            pass
+            logger.warning("FTS5 extension not available; full-text search will be disabled")
         db.commit()
 
     # -- MEMORY.md (long-term facts) -----------------------------------------

@@ -130,11 +130,9 @@ class TestDreamCursor:
 
 
 class TestLegacyHistoryMigration:
-    def test_read_unprocessed_history_handles_entries_without_cursor(self, store):
-        """JSONL entries with cursor=1 are correctly parsed and returned."""
-        store.history_file.write_text(
-            '{"cursor": 1, "timestamp": "2026-03-30 14:30", "content": "Old event"}\n',
-            encoding="utf-8")
+    def test_read_unprocessed_history_handles_entries_via_append(self, store):
+        """Entries appended via append_history() are correctly returned."""
+        store.append_history("Old event")
         entries = store.read_unprocessed_history(since_cursor=0)
         assert len(entries) == 1
         assert entries[0]["cursor"] == 1
@@ -167,10 +165,13 @@ class TestLegacyHistoryMigration:
         assert "USER: hello" in entries[1]["content"]
         assert entries[2]["timestamp"] == fallback_timestamp
         assert entries[2]["content"].startswith("Legacy chunk without timestamp.")
-        assert store.read_file(store._cursor_file).strip() == "3"
-        assert store.read_file(store._dream_cursor_file).strip() == "3"
+        # Migration goes directly to SQLite — no .cursor or .dream_cursor files
+        assert not store._cursor_file.exists()
+        assert not store._dream_cursor_file.exists()
         assert not legacy_file.exists()
         assert (memory_dir / "HISTORY.md.bak").read_text(encoding="utf-8") == legacy_content
+        # Dream cursor is set in SQLite metadata
+        assert store.get_last_dream_cursor() == 3
 
     def test_migrates_consecutive_entries_without_blank_lines(self, tmp_path):
         memory_dir = tmp_path / "memory"
@@ -218,7 +219,7 @@ class TestLegacyHistoryMigration:
         memory_dir.mkdir()
         legacy_file = memory_dir / "HISTORY.md"
         legacy_content = (
-            "[2026-03-25–2026-04-02] Multi-day summary.\n"
+            "[2026-03-25\u20132026-04-02] Multi-day summary.\n"
             "[2026-03-26/27] Cross-day summary.\n"
         )
         legacy_file.write_text(legacy_content, encoding="utf-8")
@@ -231,18 +232,18 @@ class TestLegacyHistoryMigration:
         entries = store.read_unprocessed_history(since_cursor=0)
         assert len(entries) == 2
         assert entries[0]["timestamp"] == fallback_timestamp
-        assert entries[0]["content"] == "[2026-03-25–2026-04-02] Multi-day summary."
+        assert entries[0]["content"] == "[2026-03-25\u20132026-04-02] Multi-day summary."
         assert entries[1]["timestamp"] == fallback_timestamp
         assert entries[1]["content"] == "[2026-03-26/27] Cross-day summary."
 
-    def test_existing_history_jsonl_skips_legacy_migration(self, tmp_path):
+    def test_existing_history_db_skips_legacy_migration(self, tmp_path):
+        """Existing history.db prevents legacy HISTORY.md migration."""
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
-        history_file = memory_dir / "history.jsonl"
-        history_file.write_text(
-            '{"cursor": 7, "timestamp": "2026-04-01 12:00", "content": "existing"}\n',
-            encoding="utf-8",
-        )
+        # Create a pre-existing history.db with data
+        pre_store = MemoryStore(tmp_path)
+        pre_store.append_history("existing")
+        # Now create a legacy file that should NOT be migrated
         legacy_file = memory_dir / "HISTORY.md"
         legacy_file.write_text("[2026-04-01 10:00] legacy\n\n", encoding="utf-8")
 
@@ -250,16 +251,13 @@ class TestLegacyHistoryMigration:
 
         entries = store.read_unprocessed_history(since_cursor=0)
         assert len(entries) == 1
-        assert entries[0]["cursor"] == 7
         assert entries[0]["content"] == "existing"
         assert legacy_file.exists()
         assert not (memory_dir / "HISTORY.md.bak").exists()
 
-    def test_empty_history_jsonl_still_allows_legacy_migration(self, tmp_path):
+    def test_empty_history_db_still_allows_legacy_migration(self, tmp_path):
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
-        history_file = memory_dir / "history.jsonl"
-        history_file.write_text("", encoding="utf-8")
         legacy_file = memory_dir / "HISTORY.md"
         legacy_file.write_text("[2026-04-01 10:00] legacy\n\n", encoding="utf-8")
 
@@ -393,3 +391,68 @@ class TestQueryHistory:
             store.append_history(f"event {i}")
         results = store.query_history(limit=3)
         assert len(results) == 3
+
+
+class TestJSONLToSQLiteMigration:
+    """Tests for automatic JSONL → SQLite migration."""
+
+    def test_migrates_existing_jsonl(self, tmp_path):
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        jsonl = memory_dir / "history.jsonl"
+        jsonl.write_text(
+            '{"cursor": 1, "timestamp": "2026-04-01 10:00", "content": "event one"}\n'
+            '{"cursor": 2, "timestamp": "2026-04-01 11:00", "content": "event two"}\n',
+            encoding="utf-8",
+        )
+        cursor_file = memory_dir / ".cursor"
+        cursor_file.write_text("2", encoding="utf-8")
+        dream_cursor = memory_dir / ".dream_cursor"
+        dream_cursor.write_text("1", encoding="utf-8")
+
+        store = MemoryStore(tmp_path)
+        entries = store.read_unprocessed_history(since_cursor=0)
+        assert len(entries) == 2
+        assert entries[0]["content"] == "event one"
+        assert entries[1]["content"] == "event two"
+        assert store.get_last_dream_cursor() == 1
+        assert not jsonl.exists()
+        assert (memory_dir / "history.jsonl.bak").exists()
+        assert not cursor_file.exists()
+        assert not dream_cursor.exists()
+        assert (memory_dir / "history.db").exists()
+
+    def test_migration_preserves_original_cursors(self, tmp_path):
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        jsonl = memory_dir / "history.jsonl"
+        jsonl.write_text(
+            '{"cursor": 5, "timestamp": "2026-04-01 10:00", "content": "late start"}\n'
+            '{"cursor": 6, "timestamp": "2026-04-01 11:00", "content": "next"}\n',
+            encoding="utf-8",
+        )
+        (memory_dir / ".cursor").write_text("6", encoding="utf-8")
+
+        store = MemoryStore(tmp_path)
+        entries = store.read_unprocessed_history(since_cursor=4)
+        assert len(entries) == 2
+        assert entries[0]["cursor"] == 5
+
+    def test_no_jsonl_means_no_migration(self, tmp_path):
+        store = MemoryStore(tmp_path)
+        store.append_history("fresh start")
+        assert not (tmp_path / "memory" / "history.jsonl.bak").exists()
+
+    def test_migrated_entries_are_searchable(self, tmp_path):
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        jsonl = memory_dir / "history.jsonl"
+        jsonl.write_text(
+            '{"cursor": 1, "timestamp": "2026-04-01 10:00", "content": "部署脚本讨论"}\n',
+            encoding="utf-8",
+        )
+        (memory_dir / ".cursor").write_text("1", encoding="utf-8")
+
+        store = MemoryStore(tmp_path)
+        results = store.search_history("部署")
+        assert len(results) == 1
