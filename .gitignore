@@ -9,6 +9,11 @@ CLAUDE.md
 start.sh
 docs/superpowers/
 
+# SQLite database files (memory system)
+*.db
+*.db-wal
+*.db-shm
+
 # Python bytecode & caches
 *.pyc
 *.pyo
