@@ -486,8 +486,8 @@ class Consolidator:
 
     _MAX_CONSOLIDATION_ROUNDS = 5
     _MAX_CHUNK_MESSAGES = 60  # hard cap per consolidation round
-
     _SAFETY_BUFFER = 1024  # extra headroom for tokenizer estimation drift
+    _PRUNED_TOOL_PLACEHOLDER = "[Tool output cleared to save context]"
 
     def __init__(
         self,
@@ -511,6 +511,34 @@ class Consolidator:
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+
+    def _prune_old_tool_results(
+        self,
+        messages: list[dict[str, Any]],
+        protect_tail_idx: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Replace large old tool results with a placeholder (cheap, no LLM).
+
+        Args:
+            messages: Session messages list (modified in-place).
+            protect_tail_idx: Index from which to start protecting (messages
+                at this index and beyond are not pruned).
+
+        Returns:
+            (messages, pruned_count)
+        """
+        pruned = 0
+        for i in range(min(protect_tail_idx, len(messages))):
+            msg = messages[i]
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            if not content or content == self._PRUNED_TOOL_PLACEHOLDER:
+                continue
+            if isinstance(content, str) and len(content) > 200:
+                messages[i] = {**msg, "content": self._PRUNED_TOOL_PLACEHOLDER}
+                pruned += 1
+        return messages, pruned
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
@@ -634,6 +662,31 @@ class Consolidator:
                     unconsolidated_count,
                 )
                 return
+
+            # Phase 0: prune old tool results (cheap, no LLM call)
+            tail_protect_idx = max(
+                len(session.messages) - 3,
+                int(len(session.messages) * 0.8),
+            )
+            _, prune_count = self._prune_old_tool_results(
+                session.messages, protect_tail_idx=tail_protect_idx,
+            )
+            if prune_count:
+                logger.info(
+                    "Tool output pruning: cleared {} result(s) for {}",
+                    prune_count, session.key,
+                )
+                self.sessions.save(session)
+                try:
+                    estimated, source = self.estimate_session_prompt_tokens(session)
+                except Exception:
+                    logger.exception("Token estimation failed for {}", session.key)
+                    return
+                if estimated < budget:
+                    logger.debug(
+                        "Tool pruning sufficient for {}: {}/{}", session.key, estimated, budget,
+                    )
+                    return
 
             for round_num in range(self._MAX_CONSOLIDATION_ROUNDS):
                 if estimated <= target:
