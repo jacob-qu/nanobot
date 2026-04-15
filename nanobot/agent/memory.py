@@ -861,17 +861,13 @@ class Consolidator:
                     )
                     return
 
-                if end_idx is not None:
-                    end_idx = self._align_boundary_backward(
-                        session.messages, end_idx,
-                    )
-                    start_aligned = self._align_boundary_forward(
-                        session.messages, session.last_consolidated,
-                    )
-                    if start_aligned >= end_idx:
-                        end_idx = None
-
-                if end_idx is None:
+                end_idx = self._align_boundary_backward(
+                    session.messages, end_idx,
+                )
+                start_aligned = self._align_boundary_forward(
+                    session.messages, session.last_consolidated,
+                )
+                if start_aligned >= end_idx:
                     return
 
                 chunk = session.messages[session.last_consolidated:end_idx]

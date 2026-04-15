@@ -243,7 +243,7 @@ class AgentLoop:
             sessions=self.sessions,
             consolidator=self.consolidator,
             session_ttl_minutes=session_ttl_minutes,
-            context_window_tokens=context_window_tokens,
+            context_window_tokens=self.context_window_tokens,
         )
         self.dream = Dream(
             store=self.context.memory,
