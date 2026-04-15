@@ -376,3 +376,103 @@ class TestAutoCompactTokenBudget:
         assert len(kept) >= ac._RECENT_SUFFIX_MESSAGES
         # Should archive something
         assert len(archive) > 0
+
+
+class TestSummaryStatePersistence:
+    def test_persist_summary_state_writes_to_metadata(self):
+        """persist_summary_state should store summary in session.metadata."""
+        c = _make_consolidator()
+        session = Session(key="cli:test", messages=[], last_consolidated=0)
+        c._previous_summary["cli:test"] = "## Goal\nSaved summary"
+
+        c.persist_summary_state(session)
+        assert session.metadata["_consolidation_summary"] == "## Goal\nSaved summary"
+
+    def test_persist_summary_state_clears_when_no_summary(self):
+        """persist_summary_state should remove key when no summary exists."""
+        c = _make_consolidator()
+        session = Session(key="cli:test", messages=[], last_consolidated=0)
+        session.metadata["_consolidation_summary"] = "old"
+
+        c.persist_summary_state(session)
+        assert "_consolidation_summary" not in session.metadata
+
+    def test_restore_summary_state_loads_from_metadata(self):
+        """restore_summary_state should populate _previous_summary from metadata."""
+        c = _make_consolidator()
+        session = Session(key="cli:test", messages=[], last_consolidated=0)
+        session.metadata["_consolidation_summary"] = "## Goal\nRestored summary"
+
+        c.restore_summary_state(session)
+        assert c._previous_summary["cli:test"] == "## Goal\nRestored summary"
+
+    def test_restore_summary_state_noop_if_already_in_memory(self):
+        """restore_summary_state should not overwrite in-memory summary."""
+        c = _make_consolidator()
+        c._previous_summary["cli:test"] = "## Goal\nIn-memory version"
+        session = Session(key="cli:test", messages=[], last_consolidated=0)
+        session.metadata["_consolidation_summary"] = "## Goal\nStale disk version"
+
+        c.restore_summary_state(session)
+        assert c._previous_summary["cli:test"] == "## Goal\nIn-memory version"
+
+    def test_restore_summary_state_noop_without_metadata(self):
+        """restore_summary_state should do nothing when metadata has no summary."""
+        c = _make_consolidator()
+        session = Session(key="cli:test", messages=[], last_consolidated=0)
+
+        c.restore_summary_state(session)
+        assert "cli:test" not in c._previous_summary
+
+
+class TestCompressionIntegration:
+    @pytest.mark.asyncio
+    async def test_full_compression_pipeline(self):
+        """End-to-end: tool pruning -> boundary alignment -> structured summary -> sanitization."""
+        c = _make_consolidator(context_window_tokens=128_000)
+
+        async def _fake_llm(**kwargs):
+            return MagicMock(content="## Goal\nTest integration\n## Progress\n### Done\nAll done")
+
+        c.provider.chat_with_retry = _fake_llm
+        c.store.append_history = MagicMock()
+        c.store.raw_archive = MagicMock()
+
+        session = Session(key="cli:integration", messages=[], last_consolidated=0)
+        # Build a realistic session with tool calls
+        session.messages.append({"role": "user", "content": "run something"})
+        session.messages.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tc1", "function": {"name": "bash", "arguments": '{"cmd":"ls -la"}'}}
+        ]})
+        session.messages.append({"role": "tool", "content": "x" * 500, "tool_call_id": "tc1"})
+        session.messages.append({"role": "user", "content": "now do another thing"})
+        session.messages.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tc2", "function": {"name": "bash", "arguments": '{"cmd":"cat file"}'}}
+        ]})
+        session.messages.append({"role": "tool", "content": "y" * 500, "tool_call_id": "tc2"})
+        session.messages.append({"role": "user", "content": "thanks"})
+        session.messages.append({"role": "assistant", "content": "you're welcome"})
+
+        # Test pruning
+        _, prune_count = c._prune_old_tool_results(session.messages, protect_tail_idx=6)
+        assert prune_count >= 1
+
+        # Test boundary alignment
+        aligned_start = c._align_boundary_forward(session.messages, 0)
+        assert session.messages[aligned_start].get("role") != "tool"
+
+        # Test sanitization on a deliberately broken list
+        broken = [
+            {"role": "tool", "content": "orphan", "tool_call_id": "gone"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        sanitized = c._sanitize_tool_pairs(broken)
+        assert not any(m.get("tool_call_id") == "gone" for m in sanitized)
+
+        # Test archive with structured template
+        result = await c.archive(
+            session.messages[:4], session_key="cli:integration",
+        )
+        assert result is not None
+        assert "[CONTEXT COMPACTION]" in result
+        assert "cli:integration" in c._previous_summary

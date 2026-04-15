@@ -628,6 +628,21 @@ class Consolidator:
 
         return messages
 
+    def persist_summary_state(self, session: Session) -> None:
+        """Persist _previous_summary to session metadata for restart recovery."""
+        summary = self._previous_summary.get(session.key)
+        if summary:
+            session.metadata["_consolidation_summary"] = summary
+        else:
+            session.metadata.pop("_consolidation_summary", None)
+
+    def restore_summary_state(self, session: Session) -> None:
+        """Restore _previous_summary from session metadata after restart."""
+        if session.key not in self._previous_summary:
+            stored = session.metadata.get("_consolidation_summary")
+            if stored:
+                self._previous_summary[session.key] = stored
+
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
@@ -776,6 +791,7 @@ class Consolidator:
 
         lock = self.get_lock(session.key)
         async with lock:
+            self.restore_summary_state(session)
             budget = self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
             target = budget // 2
             try:
@@ -875,6 +891,7 @@ class Consolidator:
                     return
                 session.last_consolidated = end_idx
                 self.sessions.save(session)
+                self.persist_summary_state(session)
 
                 remaining = session.messages[session.last_consolidated:]
                 sanitized = self._sanitize_tool_pairs(remaining)
