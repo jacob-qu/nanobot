@@ -218,3 +218,92 @@ class TestSummaryFailureCooldown:
 
         await c.archive([{"role": "user", "content": "b"}], session_key="cli:test")
         assert call_count == 2
+
+
+class TestBoundaryAlignment:
+    def test_align_forward_skips_tool_messages(self):
+        """Boundary should skip past consecutive tool messages at the start."""
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "content": "result1", "tool_call_id": "tc1"},
+            {"role": "tool", "content": "result2", "tool_call_id": "tc2"},
+            {"role": "user", "content": "ok"},
+        ]
+        c = _make_consolidator()
+        assert c._align_boundary_forward(messages, 1) == 3
+
+    def test_align_forward_noop_on_non_tool(self):
+        """If idx is already on a non-tool message, return it unchanged."""
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        c = _make_consolidator()
+        assert c._align_boundary_forward(messages, 0) == 0
+
+    def test_align_backward_pulls_before_assistant(self):
+        """Boundary inside tool group should pull back to before the assistant."""
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "tc1", "function": {"name": "bash", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "content": "result", "tool_call_id": "tc1"},
+            {"role": "user", "content": "ok"},
+        ]
+        c = _make_consolidator()
+        assert c._align_boundary_backward(messages, 2) == 1
+
+    def test_align_backward_noop_when_no_tool_group(self):
+        """If boundary is not in a tool group, return unchanged."""
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "ok"},
+        ]
+        c = _make_consolidator()
+        assert c._align_boundary_backward(messages, 2) == 2
+
+
+class TestSanitizeToolPairs:
+    def test_removes_orphaned_tool_results(self):
+        """Tool results without matching assistant tool_calls should be removed."""
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "content": "orphan", "tool_call_id": "tc_gone"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        c = _make_consolidator()
+        sanitized = c._sanitize_tool_pairs(messages)
+        assert len(sanitized) == 2
+        assert not any(m.get("tool_call_id") == "tc_gone" for m in sanitized)
+
+    def test_inserts_stub_for_orphaned_calls(self):
+        """Assistant tool_calls without results should get a stub result."""
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "tc1", "function": {"name": "bash", "arguments": "{}"}}
+            ]},
+            {"role": "user", "content": "ok"},
+        ]
+        c = _make_consolidator()
+        sanitized = c._sanitize_tool_pairs(messages)
+        assert len(sanitized) == 3
+        stub = sanitized[1]
+        assert stub["role"] == "tool"
+        assert stub["tool_call_id"] == "tc1"
+        assert "earlier conversation" in stub["content"]
+
+    def test_matched_pairs_unchanged(self):
+        """Complete tool_call/result pairs should be left intact."""
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "tc1", "function": {"name": "bash", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "content": "result", "tool_call_id": "tc1"},
+            {"role": "user", "content": "thanks"},
+        ]
+        c = _make_consolidator()
+        sanitized = c._sanitize_tool_pairs(messages)
+        assert len(sanitized) == 3
+        assert sanitized[1]["content"] == "result"

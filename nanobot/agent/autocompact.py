@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine
 
 from loguru import logger
+from nanobot.agent.memory import Consolidator
 from nanobot.session.manager import Session, SessionManager
-
-if TYPE_CHECKING:
-    from nanobot.agent.memory import Consolidator
 
 
 class AutoCompact:
@@ -56,6 +54,8 @@ class AutoCompact:
         probe.retain_recent_legal_suffix(self._RECENT_SUFFIX_MESSAGES)
         kept = probe.messages
         cut = len(tail) - len(kept)
+        if cut > 0 and cut < len(tail):
+            cut = Consolidator._align_boundary_backward(tail, cut)
         return tail[:cut], kept
 
     def check_expired(self, schedule_background: Callable[[Coroutine], None],

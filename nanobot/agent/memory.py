@@ -549,6 +549,84 @@ class Consolidator:
                 pruned += 1
         return messages, pruned
 
+    @staticmethod
+    def _align_boundary_forward(messages: list[dict[str, Any]], idx: int) -> int:
+        """Push boundary forward past any tool results at the start position."""
+        while idx < len(messages) and messages[idx].get("role") == "tool":
+            idx += 1
+        return idx
+
+    @staticmethod
+    def _align_boundary_backward(messages: list[dict[str, Any]], idx: int) -> int:
+        """Pull boundary backward to avoid splitting a tool_call/result group.
+
+        If idx falls inside consecutive tool results, walk back to find the
+        parent assistant message and return its index.
+        """
+        if idx <= 0 or idx >= len(messages):
+            return idx
+        check = idx - 1
+        while check >= 0 and messages[check].get("role") == "tool":
+            check -= 1
+        if (
+            check >= 0
+            and messages[check].get("role") == "assistant"
+            and messages[check].get("tool_calls")
+        ):
+            idx = check
+        return idx
+
+    @staticmethod
+    def _sanitize_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fix orphaned tool_call / tool_result pairs after compression."""
+        surviving_call_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    cid = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                    if cid:
+                        surviving_call_ids.add(cid)
+
+        result_call_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "tool":
+                cid = msg.get("tool_call_id")
+                if cid:
+                    result_call_ids.add(cid)
+
+        # Remove orphaned results
+        orphaned_results = result_call_ids - surviving_call_ids
+        if orphaned_results:
+            messages = [
+                m for m in messages
+                if not (m.get("role") == "tool" and m.get("tool_call_id") in orphaned_results)
+            ]
+
+        # Insert stubs for orphaned calls
+        missing_results = surviving_call_ids - result_call_ids
+        if missing_results:
+            patched: list[dict[str, Any]] = []
+            for msg in messages:
+                patched.append(msg)
+                if msg.get("role") == "assistant":
+                    for tc in msg.get("tool_calls") or []:
+                        cid = (
+                            tc.get("id", "") if isinstance(tc, dict)
+                            else getattr(tc, "id", "")
+                        )
+                        if cid in missing_results:
+                            patched.append({
+                                "role": "tool",
+                                "content": (
+                                    "[Result from earlier conversation"
+                                    " — see context summary]"
+                                ),
+                                "tool_call_id": cid,
+                            })
+            messages = patched
+
+        return messages
+
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
@@ -749,6 +827,19 @@ class Consolidator:
                     )
                     return
 
+                if end_idx is not None:
+                    end_idx = self._align_boundary_backward(
+                        session.messages, end_idx,
+                    )
+                    start_aligned = self._align_boundary_forward(
+                        session.messages, session.last_consolidated,
+                    )
+                    if start_aligned >= end_idx:
+                        end_idx = None
+
+                if end_idx is None:
+                    return
+
                 chunk = session.messages[session.last_consolidated:end_idx]
                 if not chunk:
                     return
@@ -766,6 +857,14 @@ class Consolidator:
                     return
                 session.last_consolidated = end_idx
                 self.sessions.save(session)
+
+                remaining = session.messages[session.last_consolidated:]
+                sanitized = self._sanitize_tool_pairs(remaining)
+                if len(sanitized) != len(remaining):
+                    session.messages = (
+                        session.messages[:session.last_consolidated] + sanitized
+                    )
+                    self.sessions.save(session)
 
                 try:
                     estimated, source = self.estimate_session_prompt_tokens(session)
