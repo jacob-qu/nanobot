@@ -23,7 +23,7 @@ class AutoCompact:
         self._ttl = session_ttl_minutes
         self._archiving: set[str] = set()
         self._summaries: dict[str, tuple[str, datetime]] = {}
-        self._tail_token_budget = int(context_window_tokens * 0.20) if context_window_tokens > 0 else 0
+        self._tail_token_budget = int(context_window_tokens * 0.20) if context_window_tokens and context_window_tokens > 0 else 0
 
     def _is_expired(self, ts: datetime | str | None,
                     now: datetime | None = None) -> bool:

@@ -513,7 +513,7 @@ class Consolidator:
         self.sessions = sessions
         self.context_window_tokens = context_window_tokens
         self.max_completion_tokens = max_completion_tokens
-        self.tail_protect_tokens = int(context_window_tokens * 0.20) if context_window_tokens > 0 else 0
+        self.tail_protect_tokens = int(context_window_tokens * 0.20) if context_window_tokens and context_window_tokens > 0 else 0
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
@@ -631,7 +631,7 @@ class Consolidator:
     def persist_summary_state(self, session: Session) -> None:
         """Persist _previous_summary to session metadata for restart recovery."""
         summary = self._previous_summary.get(session.key)
-        if summary:
+        if summary is not None:
             session.metadata["_consolidation_summary"] = summary
         else:
             session.metadata.pop("_consolidation_summary", None)
@@ -890,8 +890,8 @@ class Consolidator:
                 if not await self.archive(chunk, session_key=session.key):
                     return
                 session.last_consolidated = end_idx
-                self.sessions.save(session)
                 self.persist_summary_state(session)
+                self.sessions.save(session)
 
                 remaining = session.messages[session.last_consolidated:]
                 sanitized = self._sanitize_tool_pairs(remaining)
