@@ -27,6 +27,9 @@ def _make_loop(tmp_path, *, estimated_tokens: int, context_window_tokens: int) -
     )
     loop.tools.get_definitions = MagicMock(return_value=[])
     loop.consolidator._SAFETY_BUFFER = 0
+    # Disable tail protection for these tests; it's tested separately in
+    # test_context_compression.py::TestConsolidatorTailProtection.
+    loop.consolidator.tail_protect_tokens = 0
     return loop
 
 
@@ -163,7 +166,7 @@ async def test_preflight_consolidation_before_llm_call(tmp_path, monkeypatch) ->
 
     loop = _make_loop(tmp_path, estimated_tokens=0, context_window_tokens=200)
 
-    async def track_consolidate(messages):
+    async def track_consolidate(messages, session_key=""):
         order.append("consolidate")
         return True
     loop.consolidator.archive = track_consolidate  # type: ignore[method-assign]

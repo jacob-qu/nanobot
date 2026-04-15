@@ -6,7 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.memory import Consolidator
+from nanobot.session.manager import Session
 
 _PRUNED_TOOL_PLACEHOLDER = Consolidator._PRUNED_TOOL_PLACEHOLDER
 
@@ -307,3 +309,70 @@ class TestSanitizeToolPairs:
         sanitized = c._sanitize_tool_pairs(messages)
         assert len(sanitized) == 3
         assert sanitized[1]["content"] == "result"
+
+
+class TestConsolidatorTailProtection:
+    def test_tail_protect_tokens_default(self):
+        """Default tail_protect_tokens should be 20% of context_window_tokens."""
+        c = _make_consolidator(context_window_tokens=100_000)
+        assert c.tail_protect_tokens == 20_000
+
+    def test_boundary_respects_tail_budget(self):
+        """pick_consolidation_boundary should not eat into the tail budget."""
+        c = _make_consolidator(context_window_tokens=100_000)
+        # tail_protect_tokens = 20_000
+        session = Session(key="test", messages=[], last_consolidated=0)
+        # Each message ~10 tokens; 100 messages = ~1000 tokens total
+        for i in range(100):
+            session.messages.append({"role": "user" if i % 2 == 0 else "assistant",
+                                     "content": f"msg {i}"})
+        # Ask to remove 500 tokens — should succeed but protect tail
+        result = c.pick_consolidation_boundary(session, tokens_to_remove=500)
+        assert result is not None
+        end_idx = result[0]
+        # Should not consume all messages
+        assert end_idx < len(session.messages) - 3
+
+
+class TestAutoCompactTokenBudget:
+    def test_token_budget_replaces_fixed_count(self):
+        """AutoCompact with context_window_tokens should use token budget, not fixed 8."""
+        ac = AutoCompact(
+            sessions=MagicMock(),
+            consolidator=MagicMock(),
+            session_ttl_minutes=15,
+            context_window_tokens=128_000,
+        )
+        assert ac._tail_token_budget > 0
+        assert ac._RECENT_SUFFIX_MESSAGES == 3  # hard minimum
+
+    def test_fallback_to_fixed_count_without_context_tokens(self):
+        """AutoCompact without context_window_tokens should use fixed 8 messages."""
+        ac = AutoCompact(
+            sessions=MagicMock(),
+            consolidator=MagicMock(),
+            session_ttl_minutes=15,
+        )
+        assert ac._tail_token_budget == 0
+
+    def test_split_unconsolidated_uses_token_budget(self):
+        """With token budget, split should protect roughly the right amount."""
+        sessions = MagicMock()
+        # Use a small context_window so tail_token_budget = 20% of 1000 = 200 tokens
+        ac = AutoCompact(
+            sessions=sessions,
+            consolidator=MagicMock(),
+            session_ttl_minutes=15,
+            context_window_tokens=1_000,
+        )
+        session = Session(key="test", messages=[], last_consolidated=0)
+        for i in range(20):
+            session.messages.append(
+                {"role": "user" if i % 2 == 0 else "assistant",
+                 "content": f"message number {i} " + "x" * 100}
+            )
+        archive, kept = ac._split_unconsolidated(session)
+        # Should keep more than the hard minimum of 3
+        assert len(kept) >= ac._RECENT_SUFFIX_MESSAGES
+        # Should archive something
+        assert len(archive) > 0

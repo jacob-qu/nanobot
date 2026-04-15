@@ -513,6 +513,7 @@ class Consolidator:
         self.sessions = sessions
         self.context_window_tokens = context_window_tokens
         self.max_completion_tokens = max_completion_tokens
+        self.tail_protect_tokens = int(context_window_tokens * 0.20) if context_window_tokens > 0 else 0
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
@@ -636,14 +637,31 @@ class Consolidator:
         session: Session,
         tokens_to_remove: int,
     ) -> tuple[int, int] | None:
-        """Pick a user-turn boundary that removes enough old prompt tokens."""
+        """Pick a user-turn boundary that removes enough old prompt tokens.
+
+        Respects tail_protect_tokens: will not advance past the point where
+        remaining messages would fall below the tail budget.
+        """
         start = session.last_consolidated
         if start >= len(session.messages) or tokens_to_remove <= 0:
             return None
 
+        # Compute tail protection boundary
+        tail_limit = len(session.messages)
+        if self.tail_protect_tokens > 0:
+            tail_tokens = 0
+            for i in range(len(session.messages) - 1, start - 1, -1):
+                tail_tokens += estimate_message_tokens(session.messages[i])
+                if tail_tokens >= self.tail_protect_tokens:
+                    tail_limit = i
+                    break
+            # Hard minimum: always keep at least 3 messages (only when tail protection active)
+            tail_limit = min(tail_limit, len(session.messages) - 3)
+            tail_limit = max(tail_limit, start + 1)
+
         removed_tokens = 0
         last_boundary: tuple[int, int] | None = None
-        for idx in range(start, len(session.messages)):
+        for idx in range(start, min(len(session.messages), tail_limit)):
             message = session.messages[idx]
             if idx > start and message.get("role") == "user":
                 last_boundary = (idx, removed_tokens)

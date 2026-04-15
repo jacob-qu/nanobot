@@ -9,18 +9,21 @@ from typing import Any, Callable, Coroutine
 from loguru import logger
 from nanobot.agent.memory import Consolidator
 from nanobot.session.manager import Session, SessionManager
+from nanobot.utils.helpers import estimate_message_tokens
 
 
 class AutoCompact:
-    _RECENT_SUFFIX_MESSAGES = 8
+    _RECENT_SUFFIX_MESSAGES = 3  # hard minimum (was 8)
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
-                 session_ttl_minutes: int = 0):
+                 session_ttl_minutes: int = 0,
+                 context_window_tokens: int = 0):
         self.sessions = sessions
         self.consolidator = consolidator
         self._ttl = session_ttl_minutes
         self._archiving: set[str] = set()
         self._summaries: dict[str, tuple[str, datetime]] = {}
+        self._tail_token_budget = int(context_window_tokens * 0.20) if context_window_tokens > 0 else 0
 
     def _is_expired(self, ts: datetime | str | None,
                     now: datetime | None = None) -> bool:
@@ -43,6 +46,25 @@ class AutoCompact:
         if not tail:
             return [], []
 
+        if self._tail_token_budget > 0:
+            # Token-budget approach: walk backward
+            accumulated = 0
+            cut_idx = len(tail)
+            for i in range(len(tail) - 1, -1, -1):
+                msg_tokens = estimate_message_tokens(tail[i])
+                if accumulated + msg_tokens > self._tail_token_budget and (len(tail) - i) >= self._RECENT_SUFFIX_MESSAGES:
+                    break
+                accumulated += msg_tokens
+                cut_idx = i
+            # Ensure hard minimum
+            cut_idx = min(cut_idx, len(tail) - self._RECENT_SUFFIX_MESSAGES)
+            cut_idx = max(cut_idx, 0)
+            # Apply boundary alignment from Task 3
+            if cut_idx > 0 and cut_idx < len(tail):
+                cut_idx = Consolidator._align_boundary_backward(tail, cut_idx)
+            return tail[:cut_idx], tail[cut_idx:]
+
+        # Fallback: fixed message count (backward compat, when context_window_tokens=0)
         probe = Session(
             key=session.key,
             messages=tail.copy(),
@@ -51,7 +73,7 @@ class AutoCompact:
             metadata={},
             last_consolidated=0,
         )
-        probe.retain_recent_legal_suffix(self._RECENT_SUFFIX_MESSAGES)
+        probe.retain_recent_legal_suffix(8)  # legacy fixed count
         kept = probe.messages
         cut = len(tail) - len(kept)
         if cut > 0 and cut < len(tail):

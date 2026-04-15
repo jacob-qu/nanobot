@@ -32,6 +32,9 @@ def _make_loop(tmp_path: Path, session_ttl_minutes: int = 15) -> AgentLoop:
         session_ttl_minutes=session_ttl_minutes,
     )
     loop.tools.get_definitions = MagicMock(return_value=[])
+    # Use legacy fixed-count split for these tests; token-budget split is tested
+    # in test_context_compression.py::TestAutoCompactTokenBudget.
+    loop.auto_compact._tail_token_budget = 0
     return loop
 
 
@@ -156,7 +159,8 @@ class TestAutoCompact:
 
         assert len(archived_messages) == 4
         session_after = loop.sessions.get_or_create("cli:test")
-        assert len(session_after.messages) == loop.auto_compact._RECENT_SUFFIX_MESSAGES
+        # With _tail_token_budget=0 the fallback keeps 8 messages via retain_recent_legal_suffix
+        assert len(session_after.messages) == 8
         assert session_after.messages[0]["content"] == "msg user 2"
         assert session_after.messages[-1]["content"] == "msg assistant 5"
         await loop.close_mcp()
@@ -180,7 +184,7 @@ class TestAutoCompact:
         assert entry is not None
         assert entry[0] == "User said hello."
         session_after = loop.sessions.get_or_create("cli:test")
-        assert len(session_after.messages) == loop.auto_compact._RECENT_SUFFIX_MESSAGES
+        assert len(session_after.messages) == 8
         await loop.close_mcp()
 
     @pytest.mark.asyncio
@@ -396,7 +400,7 @@ class TestAutoCompactEdgeCases:
         await loop.auto_compact._archive("cli:test")
 
         session_after = loop.sessions.get_or_create("cli:test")
-        assert len(session_after.messages) == loop.auto_compact._RECENT_SUFFIX_MESSAGES
+        assert len(session_after.messages) == 8
         # "(nothing)" summary should not be stored
         assert "cli:test" not in loop.auto_compact._summaries
 
@@ -417,7 +421,7 @@ class TestAutoCompactEdgeCases:
         await loop.auto_compact._archive("cli:test")
 
         session_after = loop.sessions.get_or_create("cli:test")
-        assert len(session_after.messages) == loop.auto_compact._RECENT_SUFFIX_MESSAGES
+        assert len(session_after.messages) == 8
 
         await loop.close_mcp()
 
@@ -603,7 +607,7 @@ class TestProactiveAutoCompact:
         await self._run_check_expired(loop)
 
         session_after = loop.sessions.get_or_create("cli:test")
-        assert len(session_after.messages) == loop.auto_compact._RECENT_SUFFIX_MESSAGES
+        assert len(session_after.messages) == 8
         assert len(archived_messages) == 2
         entry = loop.auto_compact._summaries.get("cli:test")
         assert entry is not None
@@ -790,7 +794,7 @@ class TestProactiveAutoCompact:
 
         assert archive_count == 1
         s1_after = loop.sessions.get_or_create("cli:expired_idle")
-        assert len(s1_after.messages) == loop.auto_compact._RECENT_SUFFIX_MESSAGES
+        assert len(s1_after.messages) == 8
         s2_after = loop.sessions.get_or_create("cli:expired_active")
         assert len(s2_after.messages) == 12  # Preserved
         s3_after = loop.sessions.get_or_create("cli:recent")
@@ -939,7 +943,7 @@ class TestSummaryPersistence:
 
         # prepare_session should recover summary from metadata
         reloaded = loop.sessions.get_or_create("cli:test")
-        assert len(reloaded.messages) == loop.auto_compact._RECENT_SUFFIX_MESSAGES
+        assert len(reloaded.messages) == 8
         _, summary = loop.auto_compact.prepare_session(reloaded, "cli:test")
 
         assert summary is not None
