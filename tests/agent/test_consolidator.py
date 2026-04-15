@@ -46,7 +46,9 @@ class TestConsolidatorSummarize:
             {"role": "assistant", "content": "Done, fixed the race condition."},
         ]
         result = await consolidator.archive(messages)
-        assert result == "User fixed a bug in the auth module."
+        assert result is not None
+        assert "User fixed a bug in the auth module." in result
+        assert result.startswith("[CONTEXT COMPACTION]")
         entries = store.read_unprocessed_history(since_cursor=0)
         assert len(entries) == 1
 

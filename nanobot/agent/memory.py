@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import sqlite3
+import time
 import weakref
 from datetime import datetime
 from pathlib import Path
@@ -488,6 +489,12 @@ class Consolidator:
     _MAX_CHUNK_MESSAGES = 60  # hard cap per consolidation round
     _SAFETY_BUFFER = 1024  # extra headroom for tokenizer estimation drift
     _PRUNED_TOOL_PLACEHOLDER = "[Tool output cleared to save context]"
+    _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+    _COMPACTION_PREFIX = (
+        "[CONTEXT COMPACTION] Earlier turns were compacted. "
+        "Summary below describes completed work. "
+        "Use it and current state to continue, avoid repeating work:\n"
+    )
 
     def __init__(
         self,
@@ -511,6 +518,8 @@ class Consolidator:
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        self._previous_summary: dict[str, str | None] = {}
+        self._summary_failure_cooldown: dict[str, float] = {}
 
     def _prune_old_tool_results(
         self,
@@ -599,35 +608,64 @@ class Consolidator:
             self._get_tool_definitions(),
         )
 
-    async def archive(self, messages: list[dict]) -> str | None:
+    async def archive(self, messages: list[dict], session_key: str = "") -> str | None:
         """Summarize messages via LLM and append to history.jsonl.
 
-        Returns the summary text on success, None if nothing to archive.
+        Returns the summary text (with compaction prefix) on success, None if nothing to archive.
         """
         if not messages:
             return None
+
+        # Check cooldown
+        if session_key:
+            cooldown_until = self._summary_failure_cooldown.get(session_key, 0.0)
+            if time.monotonic() < cooldown_until:
+                logger.debug("Skipping summary for {} during cooldown", session_key)
+                self.store.raw_archive(messages)
+                return None
+
         try:
             formatted = MemoryStore._format_messages(messages)
+            previous = self._previous_summary.get(session_key) if session_key else None
+
+            if previous:
+                system_content = render_template(
+                    "agent/consolidator_update.md",
+                    content=formatted,
+                    previous_summary=previous,
+                    strip=True,
+                )
+            else:
+                system_content = render_template(
+                    "agent/consolidator_archive.md",
+                    content=formatted,
+                    strip=True,
+                )
+
             response = await self.provider.chat_with_retry(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": render_template(
-                            "agent/consolidator_archive.md",
-                            strip=True,
-                        ),
-                    },
+                    {"role": "system", "content": system_content},
                     {"role": "user", "content": formatted},
                 ],
                 tools=None,
                 tool_choice=None,
             )
             summary = response.content or "[no summary]"
+
+            # Store for iterative updates
+            if session_key:
+                self._previous_summary[session_key] = summary
+                self._summary_failure_cooldown.pop(session_key, None)
+
             self.store.append_history(summary)
-            return summary
+            return f"{self._COMPACTION_PREFIX}{summary}"
         except Exception:
             logger.warning("Consolidation LLM call failed, raw-dumping to history")
+            if session_key:
+                self._summary_failure_cooldown[session_key] = (
+                    time.monotonic() + self._SUMMARY_FAILURE_COOLDOWN_SECONDS
+                )
             self.store.raw_archive(messages)
             return None
 
@@ -724,7 +762,7 @@ class Consolidator:
                     source,
                     len(chunk),
                 )
-                if not await self.archive(chunk):
+                if not await self.archive(chunk, session_key=session.key):
                     return
                 session.last_consolidated = end_idx
                 self.sessions.save(session)

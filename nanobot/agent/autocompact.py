@@ -85,8 +85,8 @@ class AutoCompact:
             last_active = session.updated_at
             summary = ""
             if archive_msgs:
-                summary = await self.consolidator.archive(archive_msgs) or ""
-            if summary and summary != "(nothing)":
+                summary = await self.consolidator.archive(archive_msgs, session_key=key) or ""
+            if summary and "(nothing)" not in summary:
                 self._summaries[key] = (summary, last_active)
                 session.metadata["_last_summary"] = {"text": summary, "last_active": last_active.isoformat()}
             session.messages = kept_msgs

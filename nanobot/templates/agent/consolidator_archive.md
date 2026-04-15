@@ -1,13 +1,31 @@
-Extract key facts from this conversation. Only output items matching these categories, skip everything else:
-- User facts: personal info, preferences, stated opinions, habits
-- Decisions: choices made, conclusions reached
-- Solutions: working approaches discovered through trial and error, especially non-obvious methods that succeeded after failed attempts
-- Events: plans, deadlines, notable occurrences
-- Preferences: communication style, tool preferences
+Create a structured handoff summary for a later assistant that will continue this conversation after earlier turns are compacted.
 
-Priority: user corrections and preferences > solutions > decisions > events > environment facts. The most valuable memory prevents the user from having to repeat themselves.
+TURNS TO SUMMARIZE:
+{{ content }}
 
-Skip: code patterns derivable from source, git history, or anything already captured in existing memory.
+Use this exact structure:
 
-Output as concise bullet points, one fact per line. No preamble, no commentary.
-If nothing noteworthy happened, output: (nothing)
+## Goal
+[What the user is trying to accomplish]
+
+## Progress
+### Done
+[Completed work — include specific file paths, commands run, results obtained]
+### In Progress
+[Work currently underway]
+
+## Key Decisions
+[Important technical decisions and why they were made]
+
+## Relevant Files
+[Files read, modified, or created — with brief note on each]
+
+## Next Steps
+[What needs to happen next to continue the work]
+
+## Critical Context
+[Any specific values, error messages, configuration details, or data that would be lost without explicit preservation]
+
+Be specific — include file paths, command outputs, error messages, and concrete values rather than vague descriptions.
+
+Write only the summary body. Do not include any preamble or prefix.
