@@ -220,6 +220,7 @@ class TestSummaryFailureCooldown:
 
         await c.archive([{"role": "user", "content": "b"}], session_key="cli:test")
         assert call_count == 2
+<<<<<<< HEAD
 
 
 class TestBoundaryAlignment:
