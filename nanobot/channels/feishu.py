@@ -360,13 +360,32 @@ class FeishuChannel(BaseChannel):
         )
         event_handler = builder.build()
 
+        # Register card action handler for approval buttons
+        card_handler = None
+        try:
+            card_handler = (
+                lark.CardActionHandler.builder()
+                .register_action_handler(self._on_card_action_sync)
+                .build()
+            )
+        except AttributeError:
+            logger.debug(
+                "lark-oapi version does not support CardActionHandler; "
+                "approval buttons disabled"
+            )
+
         # Create WebSocket client for long connection
+        ws_kwargs: dict[str, Any] = {
+            "event_handler": event_handler,
+            "log_level": lark.LogLevel.INFO,
+        }
+        if card_handler is not None:
+            ws_kwargs["card_handler"] = card_handler
         self._ws_client = lark.ws.Client(
             self.config.app_id,
             self.config.app_secret,
             domain=domain,
-            event_handler=event_handler,
-            log_level=lark.LogLevel.INFO,
+            **ws_kwargs,
         )
 
         # Start WebSocket client in a separate thread with reconnect loop.
@@ -1716,6 +1735,36 @@ class FeishuChannel(BaseChannel):
         """Ignore p2p-enter events when a user opens a bot chat."""
         logger.debug("Bot entered p2p chat (user opened chat window)")
         pass
+
+    def _on_card_action_sync(self, data: Any) -> dict:
+        """Handle card button clicks (runs in WS thread)."""
+        try:
+            action = data.event.action
+            value = action.value
+            if not isinstance(value, dict) or "id" not in value or "action" not in value:
+                return {"toast": {"type": "info", "content": "Unknown action"}}
+
+            approval_id = value["id"]
+            decision = value["action"]  # "once", "session", or "deny"
+
+            if decision not in ("once", "session", "deny"):
+                return {"toast": {"type": "error", "content": "Invalid decision"}}
+
+            from nanobot.agent.tools.approval import get_engine
+
+            engine = get_engine()
+            if engine is None:
+                return {"toast": {"type": "error", "content": "Approval not enabled"}}
+
+            resolved = engine.resolve(approval_id, decision)
+
+            label = {"once": "已允许（一次）", "session": "已允许（本会话）", "deny": "已拒绝"}
+            if resolved:
+                return {"toast": {"type": "success", "content": label.get(decision, decision)}}
+            return {"toast": {"type": "info", "content": "审批已过期"}}
+        except Exception as e:
+            logger.exception("Error handling card action: {}", e)
+            return {"toast": {"type": "error", "content": "处理失败"}}
 
     @staticmethod
     def _format_tool_hint_lines(tool_hint: str) -> str:
