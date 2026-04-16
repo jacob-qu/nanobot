@@ -199,3 +199,88 @@ class TestApprovalEngineAllowlist:
             "git clean -fd", "sess1", "feishu", "chat1"
         )
         assert approved is False  # times out
+
+
+from nanobot.agent.tools.approval import (
+    ApprovalExecTool,
+    get_approval_context,
+    set_approval_context,
+)
+
+
+class TestContextVars:
+    """Test approval context variable management."""
+
+    def test_no_context_returns_none(self):
+        assert get_approval_context() is None
+
+    def test_set_and_get_context(self):
+        token = set_approval_context("sess1", "feishu", "chat1")
+        ctx = get_approval_context()
+        assert ctx == {"session_key": "sess1", "channel": "feishu", "chat_id": "chat1"}
+        from nanobot.agent.tools.approval import _approval_ctx
+        _approval_ctx.reset(token)
+
+
+class TestApprovalExecTool:
+    """Test the ExecTool wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_no_context_bypasses_approval(self):
+        """CLI mode: no approval context -> execute directly."""
+        inner = AsyncMock()
+        inner.name = "exec"
+        inner.description = "Execute shell"
+        inner.exclusive = True
+        inner.parameters = {}
+        inner.execute = AsyncMock(return_value="output")
+
+        engine = ApprovalEngine(send_callback=AsyncMock(), timeout=5)
+        tool = ApprovalExecTool(inner=inner, engine=engine)
+
+        result = await tool.execute(command="ls -la")
+        assert result == "output"
+        inner.execute.assert_called_once_with(command="ls -la")
+
+    @pytest.mark.asyncio
+    async def test_safe_command_passes_through(self):
+        """Safe command -> no approval needed -> execute."""
+        inner = AsyncMock()
+        inner.name = "exec"
+        inner.description = "Execute shell"
+        inner.exclusive = True
+        inner.parameters = {}
+        inner.execute = AsyncMock(return_value="ok")
+
+        engine = ApprovalEngine(send_callback=AsyncMock(), timeout=5)
+        tool = ApprovalExecTool(inner=inner, engine=engine)
+
+        from nanobot.agent.tools.approval import _approval_ctx
+        token = set_approval_context("s1", "feishu", "c1")
+        try:
+            result = await tool.execute(command="echo hello")
+            assert result == "ok"
+        finally:
+            _approval_ctx.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_denied_command_returns_error(self):
+        """Dangerous command denied -> error string, inner not called."""
+        inner = AsyncMock()
+        inner.name = "exec"
+        inner.description = "Execute shell"
+        inner.exclusive = True
+        inner.parameters = {}
+        inner.execute = AsyncMock(return_value="ok")
+
+        engine = ApprovalEngine(send_callback=AsyncMock(), timeout=0.2)
+        tool = ApprovalExecTool(inner=inner, engine=engine)
+
+        from nanobot.agent.tools.approval import _approval_ctx
+        token = set_approval_context("s1", "feishu", "c1")
+        try:
+            result = await tool.execute(command="git reset --hard HEAD")
+            assert "Error" in result
+            inner.execute.assert_not_called()
+        finally:
+            _approval_ctx.reset(token)

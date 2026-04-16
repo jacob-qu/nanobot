@@ -20,6 +20,31 @@ from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
 
 # ---------------------------------------------------------------------------
+# Approval context (contextvars for async task-local state)
+# ---------------------------------------------------------------------------
+
+_approval_ctx: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "approval_ctx"
+)
+
+
+def set_approval_context(
+    session_key: str, channel: str, chat_id: str,
+) -> contextvars.Token:
+    """Set approval context for the current async task."""
+    return _approval_ctx.set({
+        "session_key": session_key,
+        "channel": channel,
+        "chat_id": chat_id,
+    })
+
+
+def get_approval_context() -> dict[str, str] | None:
+    """Get approval context, or None if not set (e.g. CLI mode)."""
+    return _approval_ctx.get(None)
+
+
+# ---------------------------------------------------------------------------
 # Dangerous command patterns (medium risk — user may legitimately need these)
 # ---------------------------------------------------------------------------
 
@@ -158,3 +183,68 @@ class ApprovalEngine:
     def get_pending_requests(self) -> list[str]:
         """Return list of pending request IDs (for testing)."""
         return list(self._pending.keys())
+
+
+# ---------------------------------------------------------------------------
+# ApprovalExecTool — wraps ExecTool with approval checks
+# ---------------------------------------------------------------------------
+
+
+class ApprovalExecTool(Tool):
+    """Wraps ExecTool with approval checks for dangerous commands."""
+
+    def __init__(self, inner: Any, engine: ApprovalEngine) -> None:
+        self._inner = inner
+        self._engine = engine
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    @property
+    def description(self) -> str:
+        return self._inner.description
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return self._inner.parameters
+
+    @property
+    def exclusive(self) -> bool:
+        return self._inner.exclusive
+
+    @property
+    def read_only(self) -> bool:
+        return self._inner.read_only
+
+    async def execute(self, **kwargs: Any) -> Any:
+        ctx = get_approval_context()
+        if ctx is None:
+            return await self._inner.execute(**kwargs)
+
+        command = kwargs.get("command", "")
+        approved, msg = await self._engine.check(
+            command, ctx["session_key"], ctx["channel"], ctx["chat_id"],
+        )
+        if not approved:
+            return f"Error: Command requires approval — {msg}"
+
+        return await self._inner.execute(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Module-level engine singleton (set by AgentLoop, read by channels)
+# ---------------------------------------------------------------------------
+
+_engine_instance: ApprovalEngine | None = None
+
+
+def set_engine(engine: ApprovalEngine | None) -> None:
+    """Set the module-level engine instance (called by AgentLoop)."""
+    global _engine_instance
+    _engine_instance = engine
+
+
+def get_engine() -> ApprovalEngine | None:
+    """Get the module-level engine instance (called by channels)."""
+    return _engine_instance
