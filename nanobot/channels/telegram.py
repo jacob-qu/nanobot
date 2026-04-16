@@ -325,6 +325,9 @@ class TelegramChannel(BaseChannel):
             )
         )
 
+        from telegram.ext import CallbackQueryHandler
+        self._app.add_handler(CallbackQueryHandler(self._on_callback_query))
+
         logger.info("Starting Telegram bot (polling mode)...")
 
         # Initialize and start polling
@@ -425,6 +428,36 @@ class TelegramChannel(BaseChannel):
                     message_id=reply_to_message_id,
                     allow_sending_without_reply=True
                 )
+
+        # Handle approval requests with inline keyboard
+        if msg.metadata.get("_approval_request"):
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            approval_id = msg.metadata["_approval_id"]
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ 允许一次",
+                        callback_data=f"approval:once:{approval_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "✅ 本会话允许",
+                        callback_data=f"approval:session:{approval_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌ 拒绝",
+                        callback_data=f"approval:deny:{approval_id}",
+                    ),
+                ]
+            ])
+            await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=msg.content,
+                reply_markup=keyboard,
+                reply_parameters=reply_params,
+                **thread_kwargs,
+            )
+            return
 
         # Send media files
         for media_path in (msg.media or []):
@@ -1053,6 +1086,43 @@ class TelegramChannel(BaseChannel):
             logger.warning("Telegram network issue: {}", summary)
         else:
             logger.error("Telegram error: {}", summary)
+
+    async def _on_callback_query(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle inline keyboard button clicks for approval."""
+        query = update.callback_query
+        if query is None or query.data is None:
+            return
+
+        parts = query.data.split(":", 2)
+        if len(parts) != 3 or parts[0] != "approval":
+            await query.answer("Unknown action")
+            return
+
+        _, decision, approval_id = parts
+        if decision not in ("once", "session", "deny"):
+            await query.answer("Invalid decision")
+            return
+
+        from nanobot.agent.tools.approval import get_engine
+
+        engine = get_engine()
+        if engine is None:
+            await query.answer("Approval not enabled")
+            return
+
+        resolved = engine.resolve(approval_id, decision)
+        label = {"once": "已允许（一次）", "session": "已允许（本会话）", "deny": "已拒绝"}
+
+        if resolved:
+            await query.answer(label.get(decision, decision))
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        else:
+            await query.answer("审批已过期")
 
     def _get_extension(
         self,
