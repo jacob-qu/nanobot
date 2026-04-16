@@ -207,12 +207,22 @@ class MyToolConfig(Base):
     allow_set: bool = False  # let `my` modify loop state (read-only if False)
 
 
+class ApprovalConfig(Base):
+    """Command approval configuration for dangerous shell commands."""
+
+    enabled: bool = False
+    timeout: int = 300  # seconds to wait for user approval before denying
+    patterns: list[str] | None = None  # custom approval patterns (overrides defaults)
+    allowlist: list[str] = Field(default_factory=list)  # pattern_keys permanently allowed
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     my: MyToolConfig = Field(default_factory=MyToolConfig)
+    approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     restrict_to_workspace: bool = False  # restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
