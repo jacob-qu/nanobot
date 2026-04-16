@@ -63,3 +63,98 @@ def detect_dangerous_command(command: str) -> str | None:
         if pattern.search(normalized):
             return key
     return None
+
+
+class ApprovalEngine:
+    """Manages dangerous command approval state and blocking wait."""
+
+    def __init__(
+        self,
+        send_callback: Any,
+        timeout: int = 300,
+        allowlist: list[str] | None = None,
+    ) -> None:
+        self._send_callback = send_callback
+        self._timeout = timeout
+        self._allowlist: set[str] = set(allowlist or [])
+        self._session_approved: dict[str, set[str]] = {}
+        self._pending: dict[str, asyncio.Event] = {}
+        self._results: dict[str, str] = {}
+
+    async def check(
+        self,
+        command: str,
+        session_key: str,
+        channel: str,
+        chat_id: str,
+    ) -> tuple[bool, str]:
+        """Check command and request approval if dangerous.
+
+        Returns (approved, message). Blocks until user responds or timeout.
+        """
+        pattern_key = detect_dangerous_command(command)
+        if pattern_key is None:
+            return True, ""
+
+        if pattern_key in self._allowlist:
+            return True, ""
+
+        session_set = self._session_approved.get(session_key, set())
+        if pattern_key in session_set:
+            return True, ""
+
+        request_id = uuid.uuid4().hex[:12]
+        event = asyncio.Event()
+        self._pending[request_id] = event
+
+        try:
+            await self._send_callback(OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=(
+                    f"⚠️ 危险命令需要审批\n\n"
+                    f"```\n{command}\n```\n\n"
+                    f"匹配规则：{pattern_key}"
+                ),
+                metadata={
+                    "_approval_request": True,
+                    "_approval_id": request_id,
+                    "_approval_command": command,
+                    "_approval_pattern": pattern_key,
+                },
+            ))
+        except Exception:
+            logger.exception("Failed to send approval request")
+            self._pending.pop(request_id, None)
+            return False, "failed to send approval request"
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=self._timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(request_id, None)
+            self._results.pop(request_id, None)
+            return False, "approval timed out"
+
+        decision = self._results.pop(request_id, "deny")
+        self._pending.pop(request_id, None)
+
+        if decision == "deny":
+            return False, "denied by user"
+
+        if decision == "session":
+            self._session_approved.setdefault(session_key, set()).add(pattern_key)
+
+        return True, ""
+
+    def resolve(self, request_id: str, decision: str) -> bool:
+        """Resolve a pending approval request. Returns True if found."""
+        event = self._pending.get(request_id)
+        if event is None:
+            return False
+        self._results[request_id] = decision
+        event.set()
+        return True
+
+    def get_pending_requests(self) -> list[str]:
+        """Return list of pending request IDs (for testing)."""
+        return list(self._pending.keys())

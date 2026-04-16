@@ -68,3 +68,134 @@ class TestUnicodeNormalization:
         assert result == "drop_table"
         result = detect_dangerous_command("Git Push --Force origin main")
         assert result == "git_force_push"
+
+
+import asyncio
+from unittest.mock import AsyncMock
+
+from nanobot.agent.tools.approval import ApprovalEngine
+
+
+class TestApprovalEngine:
+    """Test the approval engine check/resolve flow."""
+
+    @pytest.fixture
+    def engine(self):
+        send_cb = AsyncMock()
+        return ApprovalEngine(send_callback=send_cb, timeout=5, allowlist=[])
+
+    @pytest.mark.asyncio
+    async def test_safe_command_passes(self, engine):
+        approved, msg = await engine.check("ls -la", "sess1", "feishu", "chat1")
+        assert approved is True
+        assert msg == ""
+
+    @pytest.mark.asyncio
+    async def test_dangerous_command_blocks_and_resolves_once(self, engine):
+        async def approve_after_delay():
+            await asyncio.sleep(0.1)
+            pending = engine.get_pending_requests()
+            assert len(pending) == 1
+            engine.resolve(pending[0], "once")
+
+        asyncio.get_event_loop().create_task(approve_after_delay())
+        approved, msg = await engine.check(
+            "git reset --hard HEAD", "sess1", "feishu", "chat1"
+        )
+        assert approved is True
+        engine._send_callback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_dangerous_command_denied(self, engine):
+        async def deny_after_delay():
+            await asyncio.sleep(0.1)
+            pending = engine.get_pending_requests()
+            engine.resolve(pending[0], "deny")
+
+        asyncio.get_event_loop().create_task(deny_after_delay())
+        approved, msg = await engine.check(
+            "git reset --hard HEAD", "sess1", "feishu", "chat1"
+        )
+        assert approved is False
+        assert "denied" in msg
+
+    @pytest.mark.asyncio
+    async def test_session_approval_remembered(self, engine):
+        async def approve_session():
+            await asyncio.sleep(0.1)
+            pending = engine.get_pending_requests()
+            engine.resolve(pending[0], "session")
+
+        asyncio.get_event_loop().create_task(approve_session())
+        approved, _ = await engine.check(
+            "git reset --hard HEAD", "sess1", "feishu", "chat1"
+        )
+        assert approved is True
+
+        # Same pattern, same session — should pass without blocking
+        engine._send_callback.reset_mock()
+        approved, _ = await engine.check(
+            "git reset --hard origin/main", "sess1", "feishu", "chat1"
+        )
+        assert approved is True
+        engine._send_callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_session_approval_not_shared_across_sessions(self, engine):
+        async def approve_session():
+            await asyncio.sleep(0.1)
+            pending = engine.get_pending_requests()
+            engine.resolve(pending[0], "session")
+
+        asyncio.get_event_loop().create_task(approve_session())
+        await engine.check("git reset --hard HEAD", "sess1", "feishu", "chat1")
+
+        # Different session — should still require approval
+        async def approve_once():
+            await asyncio.sleep(0.1)
+            pending = engine.get_pending_requests()
+            engine.resolve(pending[0], "once")
+
+        asyncio.get_event_loop().create_task(approve_once())
+        approved, _ = await engine.check(
+            "git reset --hard HEAD", "sess2", "feishu", "chat2"
+        )
+        assert approved is True
+        assert engine._send_callback.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_timeout_denies(self, engine):
+        engine._timeout = 0.2  # very short timeout
+        approved, msg = await engine.check(
+            "git reset --hard HEAD", "sess1", "feishu", "chat1"
+        )
+        assert approved is False
+        assert "timed out" in msg
+
+
+class TestApprovalEngineAllowlist:
+    """Test permanent allowlist behavior."""
+
+    @pytest.mark.asyncio
+    async def test_allowlisted_pattern_skips_approval(self):
+        engine = ApprovalEngine(
+            send_callback=AsyncMock(), timeout=5,
+            allowlist=["git_reset_hard"],
+        )
+        approved, _ = await engine.check(
+            "git reset --hard HEAD", "sess1", "feishu", "chat1"
+        )
+        assert approved is True
+        engine._send_callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_allowlisted_still_requires_approval(self):
+        engine = ApprovalEngine(
+            send_callback=AsyncMock(), timeout=0.2,
+            allowlist=["git_reset_hard"],
+        )
+        # git clean is NOT in allowlist
+        approved, _ = await engine.check(
+            "git clean -fd", "sess1", "feishu", "chat1"
+        )
+        assert approved is False  # times out
