@@ -1376,10 +1376,65 @@ class FeishuChannel(BaseChannel):
             )
             buf.last_edit = now
 
+    def _build_approval_card(self, metadata: dict[str, Any]) -> str:
+        """Build a Feishu interactive card for command approval."""
+        approval_id = metadata["_approval_id"]
+        command = metadata["_approval_command"]
+        pattern = metadata["_approval_pattern"]
+
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "⚠️ 危险命令需要审批"},
+                "template": "orange",
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"```\n{command}\n```\n匹配规则：**{pattern}**",
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "✅ 允许一次"},
+                            "type": "primary",
+                            "value": {"action": "once", "id": approval_id},
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "✅ 本会话允许"},
+                            "type": "default",
+                            "value": {"action": "session", "id": approval_id},
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "❌ 拒绝"},
+                            "type": "danger",
+                            "value": {"action": "deny", "id": approval_id},
+                        },
+                    ],
+                },
+            ],
+        }
+        return json.dumps(card, ensure_ascii=False)
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message through Feishu, including media (images/files) if present."""
         if not self._client:
             logger.warning("Feishu client not initialized")
+            return
+
+        # Handle approval requests with interactive card
+        if msg.metadata.get("_approval_request"):
+            card_json = self._build_approval_card(msg.metadata)
+            receive_id_type = "chat_id"
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._send_message_sync, receive_id_type, msg.chat_id,
+                "interactive", card_json,
+            )
             return
 
         try:
