@@ -29,6 +29,7 @@ from nanobot.agent.tools.notebook import NotebookEditTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.search import GlobTool, GrepTool
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.agent.tools.approval import ApprovalEngine, ApprovalExecTool, set_approval_context, set_engine
 from nanobot.agent.tools.self import MyTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
@@ -167,6 +168,8 @@ class AgentLoop:
         from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
         _tc = tools_config or ToolsConfig()
+        self._approval_config = _tc.approval
+        self._approval_engine: ApprovalEngine | None = None
         defaults = AgentDefaults()
         self.bus = bus
         self.channels_config = channels_config
@@ -275,16 +278,23 @@ class AgentLoop:
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(NotebookEditTool(workspace=self.workspace, allowed_dir=allowed_dir))
         if self.exec_config.enable:
-            self.tools.register(
-                ExecTool(
-                    working_dir=str(self.workspace),
-                    timeout=self.exec_config.timeout,
-                    restrict_to_workspace=self.restrict_to_workspace,
-                    sandbox=self.exec_config.sandbox,
-                    path_append=self.exec_config.path_append,
-                    allowed_env_keys=self.exec_config.allowed_env_keys,
-                )
+            exec_tool = ExecTool(
+                working_dir=str(self.workspace),
+                timeout=self.exec_config.timeout,
+                restrict_to_workspace=self.restrict_to_workspace,
+                sandbox=self.exec_config.sandbox,
+                path_append=self.exec_config.path_append,
+                allowed_env_keys=self.exec_config.allowed_env_keys,
             )
+            if self._approval_config.enabled:
+                self._approval_engine = ApprovalEngine(
+                    send_callback=self.bus.publish_outbound,
+                    timeout=self._approval_config.timeout,
+                    allowlist=self._approval_config.allowlist,
+                )
+                set_engine(self._approval_engine)
+                exec_tool = ApprovalExecTool(inner=exec_tool, engine=self._approval_engine)
+            self.tools.register(exec_tool)
         if self.web_config.enable:
             self.tools.register(
                 WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy)
@@ -631,6 +641,11 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    @property
+    def approval_engine(self) -> ApprovalEngine | None:
+        """Return the approval engine, or None if approval is disabled."""
+        return self._approval_engine
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -708,6 +723,8 @@ class AgentLoop:
         await self.consolidator.maybe_consolidate_by_tokens(session)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        if self._approval_engine is not None:
+            set_approval_context(key, msg.channel, msg.chat_id)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
