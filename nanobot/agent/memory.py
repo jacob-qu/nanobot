@@ -762,6 +762,8 @@ class Consolidator:
                 tools=None,
                 tool_choice=None,
             )
+            if response.finish_reason == "error":
+                raise RuntimeError(f"LLM returned error: {response.content}")
             summary = response.content or "[no summary]"
 
             # Store for iterative updates
