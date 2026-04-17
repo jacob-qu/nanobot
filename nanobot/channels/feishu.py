@@ -364,11 +364,14 @@ class FeishuChannel(BaseChannel):
         card_handler = None
         try:
             card_handler = (
-                lark.CardActionHandler.builder()
-                .register_action_handler(self._on_card_action_sync)
+                lark.CardActionHandler.builder(
+                    self.config.encrypt_key or "",
+                    self.config.verification_token or "",
+                )
+                .register(self._on_card_action_sync)
                 .build()
             )
-        except AttributeError:
+        except (AttributeError, TypeError):
             logger.debug(
                 "lark-oapi version does not support CardActionHandler; "
                 "approval buttons disabled"
@@ -380,13 +383,31 @@ class FeishuChannel(BaseChannel):
             "log_level": lark.LogLevel.INFO,
         }
         if card_handler is not None:
+            # card_handler support depends on lark-oapi version; try it and fall back
             ws_kwargs["card_handler"] = card_handler
-        self._ws_client = lark.ws.Client(
-            self.config.app_id,
-            self.config.app_secret,
-            domain=domain,
-            **ws_kwargs,
-        )
+        try:
+            self._ws_client = lark.ws.Client(
+                self.config.app_id,
+                self.config.app_secret,
+                domain=domain,
+                **ws_kwargs,
+            )
+        except TypeError:
+            # Older lark-oapi doesn't accept card_handler in ws.Client
+            if card_handler is not None:
+                logger.debug(
+                    "lark-oapi ws.Client does not support card_handler; "
+                    "approval buttons will not work via WebSocket"
+                )
+                ws_kwargs.pop("card_handler", None)
+                self._ws_client = lark.ws.Client(
+                    self.config.app_id,
+                    self.config.app_secret,
+                    domain=domain,
+                    **ws_kwargs,
+                )
+            else:
+                raise
 
         # Start WebSocket client in a separate thread with reconnect loop.
         # A dedicated event loop is created for this thread so that lark_oapi's
@@ -1736,16 +1757,16 @@ class FeishuChannel(BaseChannel):
         logger.debug("Bot entered p2p chat (user opened chat window)")
         pass
 
-    def _on_card_action_sync(self, data: Any) -> dict:
+    def _on_card_action_sync(self, card: Any) -> dict:
         """Handle card button clicks (runs in WS thread).
 
-        Because the Feishu WS client dispatches callbacks in a separate thread,
-        we must bridge ``engine.resolve()`` back to the main asyncio event loop
-        via ``call_soon_threadsafe`` to safely wake the waiting ``asyncio.Event``.
+        The SDK passes a ``lark_oapi.card.model.Card`` object with ``card.action.value``
+        containing the button payload.  Because the Feishu WS client dispatches callbacks
+        in a separate thread, we bridge ``engine.resolve()`` back to the main asyncio
+        event loop via ``call_soon_threadsafe`` to safely wake the waiting ``asyncio.Event``.
         """
         try:
-            action = data.event.action
-            value = action.value
+            value = getattr(getattr(card, "action", None), "value", None)
             if not isinstance(value, dict) or "id" not in value or "action" not in value:
                 return {"toast": {"type": "info", "content": "Unknown action"}}
 
