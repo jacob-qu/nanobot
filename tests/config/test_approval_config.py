@@ -7,7 +7,6 @@ def test_approval_config_defaults():
     cfg = ApprovalConfig()
     assert cfg.enabled is False
     assert cfg.timeout == 300
-    assert cfg.patterns is None
     assert cfg.allowlist == []
 
 

@@ -217,6 +217,12 @@ class ApprovalExecTool(Tool):
     def read_only(self) -> bool:
         return self._inner.read_only
 
+    def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._inner.cast_params(params)
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        return self._inner.validate_params(params)
+
     async def execute(self, **kwargs: Any) -> Any:
         ctx = get_approval_context()
         if ctx is None:

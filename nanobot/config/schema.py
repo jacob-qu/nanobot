@@ -212,7 +212,6 @@ class ApprovalConfig(Base):
 
     enabled: bool = False
     timeout: int = 300  # seconds to wait for user approval before denying
-    patterns: list[str] | None = None  # custom approval patterns (overrides defaults)
     allowlist: list[str] = Field(default_factory=list)  # pattern_keys permanently allowed
 
 

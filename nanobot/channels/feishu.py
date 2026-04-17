@@ -1737,7 +1737,12 @@ class FeishuChannel(BaseChannel):
         pass
 
     def _on_card_action_sync(self, data: Any) -> dict:
-        """Handle card button clicks (runs in WS thread)."""
+        """Handle card button clicks (runs in WS thread).
+
+        Because the Feishu WS client dispatches callbacks in a separate thread,
+        we must bridge ``engine.resolve()`` back to the main asyncio event loop
+        via ``call_soon_threadsafe`` to safely wake the waiting ``asyncio.Event``.
+        """
         try:
             action = data.event.action
             value = action.value
@@ -1756,12 +1761,14 @@ class FeishuChannel(BaseChannel):
             if engine is None:
                 return {"toast": {"type": "error", "content": "Approval not enabled"}}
 
-            resolved = engine.resolve(approval_id, decision)
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(engine.resolve, approval_id, decision)
+            else:
+                engine.resolve(approval_id, decision)
 
             label = {"once": "已允许（一次）", "session": "已允许（本会话）", "deny": "已拒绝"}
-            if resolved:
-                return {"toast": {"type": "success", "content": label.get(decision, decision)}}
-            return {"toast": {"type": "info", "content": "审批已过期"}}
+            return {"toast": {"type": "success", "content": label.get(decision, decision)}}
         except Exception as e:
             logger.exception("Error handling card action: {}", e)
             return {"toast": {"type": "error", "content": "处理失败"}}
