@@ -35,3 +35,51 @@ def test_cron_job_from_dict_without_model():
     }
     job = CronJob.from_dict(data)
     assert job.payload.model is None
+
+
+from nanobot.config.schema import AgentDefaults, CronConfig
+
+
+def test_cron_config_model_override_defaults_to_none():
+    cfg = CronConfig()
+    assert cfg.model_override is None
+
+
+def test_cron_config_model_override_accepts_value():
+    cfg = CronConfig(model_override="deepseek/deepseek-chat")
+    assert cfg.model_override == "deepseek/deepseek-chat"
+
+
+def test_cron_config_accepts_camel_case():
+    cfg = CronConfig(**{"modelOverride": "deepseek/deepseek-chat"})
+    assert cfg.model_override == "deepseek/deepseek-chat"
+
+
+def test_agent_defaults_has_cron_config():
+    defaults = AgentDefaults()
+    assert isinstance(defaults.cron, CronConfig)
+    assert defaults.cron.model_override is None
+
+
+from nanobot.cron.service import CronService
+
+
+def test_add_job_with_model(tmp_path):
+    service = CronService(tmp_path / "cron" / "jobs.json")
+    job = service.add_job(
+        name="test",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        message="hello",
+        model="deepseek/deepseek-chat",
+    )
+    assert job.payload.model == "deepseek/deepseek-chat"
+
+
+def test_add_job_without_model(tmp_path):
+    service = CronService(tmp_path / "cron" / "jobs.json")
+    job = service.add_job(
+        name="test",
+        schedule=CronSchedule(kind="every", every_ms=60000),
+        message="hello",
+    )
+    assert job.payload.model is None

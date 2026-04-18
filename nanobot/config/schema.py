@@ -64,6 +64,15 @@ class DreamConfig(Base):
         return f"every {hours}h"
 
 
+class CronConfig(Base):
+    """Cron task default configuration."""
+
+    model_override: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("modelOverride", "model", "model_override"),
+    )
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -90,6 +99,7 @@ class AgentDefaults(Base):
         serialization_alias="idleCompactAfterMinutes",
     )  # Auto-compact idle threshold in minutes (0 = disabled)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    cron: CronConfig = Field(default_factory=CronConfig)
 
 
 class AgentsConfig(Base):
