@@ -143,3 +143,33 @@ def test_tool_schema_has_model_parameter():
     })()
     tool = CronTool(service_stub)
     assert "model" in tool.parameters["properties"]
+
+
+from nanobot.cli.commands import _resolve_cron_model
+
+
+def test_resolve_cron_model_payload_wins():
+    result = _resolve_cron_model(
+        payload_model="deepseek/deepseek-chat",
+        config_model="openai/gpt-4o",
+        global_model="anthropic/claude-opus-4-5",
+    )
+    assert result == "deepseek/deepseek-chat"
+
+
+def test_resolve_cron_model_config_fallback():
+    result = _resolve_cron_model(
+        payload_model=None,
+        config_model="openai/gpt-4o",
+        global_model="anthropic/claude-opus-4-5",
+    )
+    assert result == "openai/gpt-4o"
+
+
+def test_resolve_cron_model_global_fallback():
+    result = _resolve_cron_model(
+        payload_model=None,
+        config_model=None,
+        global_model="anthropic/claude-opus-4-5",
+    )
+    assert result == "anthropic/claude-opus-4-5"

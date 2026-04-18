@@ -403,6 +403,15 @@ def _onboard_plugins(config_path: Path) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def _resolve_cron_model(
+    payload_model: str | None,
+    config_model: str | None,
+    global_model: str,
+) -> str:
+    """Resolve effective model for a cron job: payload -> config -> global."""
+    return payload_model or config_model or global_model
+
+
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config.
 
@@ -713,6 +722,14 @@ def gateway(
             f"Scheduled instruction: {job.payload.message}"
         )
 
+        effective_model = _resolve_cron_model(
+            job.payload.model,
+            config.agents.defaults.cron.model_override,
+            agent.model,
+        )
+
+        original_model = agent.model
+        agent.model = effective_model
         cron_tool = agent.tools.get("cron")
         cron_token = None
         if isinstance(cron_tool, CronTool):
@@ -724,7 +741,23 @@ def gateway(
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
             )
+        except Exception:
+            if effective_model != original_model:
+                logger.warning(
+                    "Cron job '{}' failed with model '{}', retrying with '{}'",
+                    job.name, effective_model, original_model,
+                )
+                agent.model = original_model
+                resp = await agent.process_direct(
+                    reminder_note,
+                    session_key=f"cron:{job.id}",
+                    channel=job.payload.channel or "cli",
+                    chat_id=job.payload.to or "direct",
+                )
+            else:
+                raise
         finally:
+            agent.model = original_model
             if isinstance(cron_tool, CronTool) and cron_token is not None:
                 cron_tool.reset_cron_context(cron_token)
 
