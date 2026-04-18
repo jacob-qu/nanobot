@@ -36,6 +36,10 @@ from nanobot.cron.types import CronJob, CronJobState, CronSchedule
             description="Whether to deliver the execution result to the user channel (default true)",
             default=True,
         ),
+        model=StringSchema(
+            "Optional LLM model for this task (e.g. 'deepseek/deepseek-chat'). "
+            "When omitted, uses the cron default or global model."
+        ),
         job_id=StringSchema("REQUIRED when action='remove'. Job ID to remove (obtain via action='list')."),
         required=["action"],
     )
@@ -106,12 +110,13 @@ class CronTool(Tool):
         at: str | None = None,
         job_id: str | None = None,
         deliver: bool = True,
+        model: str | None = None,
         **kwargs: Any,
     ) -> str:
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"
-            return self._add_job(name, message, every_seconds, cron_expr, tz, at, deliver)
+            return self._add_job(name, message, every_seconds, cron_expr, tz, at, deliver, model=model)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -127,6 +132,7 @@ class CronTool(Tool):
         tz: str | None,
         at: str | None,
         deliver: bool = True,
+        model: str | None = None,
     ) -> str:
         if not message:
             return (
@@ -176,6 +182,7 @@ class CronTool(Tool):
             channel=self._channel,
             to=self._chat_id,
             delete_after_run=delete_after,
+            model=model,
         )
         return f"Created job '{job.name}' (id: {job.id})"
 
@@ -230,6 +237,8 @@ class CronTool(Tool):
             if j.payload.kind == "system_event":
                 parts.append(f"  Purpose: {self._system_job_purpose(j)}")
                 parts.append("  Protected: visible for inspection, but cannot be removed.")
+            if j.payload.model:
+                parts.append(f"  Model: {j.payload.model}")
             parts.extend(self._format_state(j.state, j.schedule))
             lines.append("\n".join(parts))
         return "Scheduled jobs:\n" + "\n".join(lines)
