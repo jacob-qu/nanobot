@@ -256,3 +256,85 @@ class TestDreamRun:
         # The template renders with stale_threshold_days=14 → LLM must see "N>14"
         assert "N>14" in system_msg
 
+
+class TestDreamNotify:
+    async def test_notify_called_with_changelog(self, store, mock_provider, mock_runner):
+        """Notify callback should be called when dream produces changes."""
+        notify = AsyncMock()
+        d = Dream(store=store, provider=mock_provider, model="test-model",
+                  max_batch_size=5, notify=notify)
+        d._runner = mock_runner
+        store.append_history("User prefers dark mode")
+        mock_provider.chat_with_retry.return_value = MagicMock(content="New fact")
+        mock_runner.run = AsyncMock(return_value=_make_run_result(
+            tool_events=[{"name": "edit_file", "status": "ok", "detail": "memory/MEMORY.md"}],
+        ))
+
+        await d.run()
+
+        notify.assert_called_once()
+        msg = notify.call_args[0][0]
+        assert "Dream 记忆整理完成" in msg
+        assert "edit_file" in msg
+
+    async def test_notify_not_called_without_changelog(self, store, mock_provider, mock_runner):
+        """Notify should not fire when dream has no tool changes."""
+        notify = AsyncMock()
+        d = Dream(store=store, provider=mock_provider, model="test-model",
+                  max_batch_size=5, notify=notify)
+        d._runner = mock_runner
+        store.append_history("some event")
+        mock_provider.chat_with_retry.return_value = MagicMock(content="[SKIP]")
+        mock_runner.run = AsyncMock(return_value=_make_run_result())
+
+        await d.run()
+
+        notify.assert_not_called()
+
+    async def test_notify_includes_restore_hint_with_git(self, store, mock_provider, mock_runner):
+        """Notify message should include /dream-restore command when git commit succeeds."""
+        notify = AsyncMock()
+        d = Dream(store=store, provider=mock_provider, model="test-model",
+                  max_batch_size=5, notify=notify)
+        d._runner = mock_runner
+        store.append_history("User changed preference")
+        mock_provider.chat_with_retry.return_value = MagicMock(content="Updated fact")
+        mock_runner.run = AsyncMock(return_value=_make_run_result(
+            tool_events=[{"name": "edit_file", "status": "ok", "detail": "memory/MEMORY.md"}],
+        ))
+
+        with patch.object(store.git, "is_initialized", return_value=True), \
+             patch.object(store.git, "auto_commit", return_value="abc12345"):
+            await d.run()
+
+        notify.assert_called_once()
+        msg = notify.call_args[0][0]
+        assert "/dream-restore abc12345" in msg
+
+    async def test_no_notify_when_callback_is_none(self, dream, mock_provider, mock_runner, store):
+        """Dream should work normally when notify is None (backward compatibility)."""
+        store.append_history("some event")
+        mock_provider.chat_with_retry.return_value = MagicMock(content="New fact")
+        mock_runner.run = AsyncMock(return_value=_make_run_result(
+            tool_events=[{"name": "edit_file", "status": "ok", "detail": "memory/MEMORY.md"}],
+        ))
+
+        result = await dream.run()
+        assert result is True
+
+    async def test_notify_failure_does_not_break_dream(self, store, mock_provider, mock_runner):
+        """Dream should complete even if notification fails."""
+        notify = AsyncMock(side_effect=Exception("network error"))
+        d = Dream(store=store, provider=mock_provider, model="test-model",
+                  max_batch_size=5, notify=notify)
+        d._runner = mock_runner
+        store.append_history("some event")
+        mock_provider.chat_with_retry.return_value = MagicMock(content="New fact")
+        mock_runner.run = AsyncMock(return_value=_make_run_result(
+            tool_events=[{"name": "edit_file", "status": "ok", "detail": "memory/MEMORY.md"}],
+        ))
+
+        result = await d.run()
+        assert result is True
+        notify.assert_called_once()
+

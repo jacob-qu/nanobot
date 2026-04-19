@@ -1,6 +1,7 @@
 Update memory files based on the analysis below.
 - [FILE] entries: add the described content to the appropriate file
 - [FILE-REMOVE] entries: delete the corresponding content from memory files
+- Prioritize [FILE-REMOVE] entries — removing stale content is as important as adding new facts
 - [SKILL] entries: create a new skill under skills/<name>/SKILL.md using write_file
 
 ## File paths (relative to workspace root)

@@ -10,7 +10,7 @@ import time
 import weakref
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -937,6 +937,7 @@ class Dream:
         max_iterations: int = 10,
         max_tool_result_chars: int = 16_000,
         annotate_line_ages: bool = True,
+        notify: Callable[[str], Awaitable[None]] | None = None,
     ):
         self.store = store
         self.provider = provider
@@ -948,6 +949,7 @@ class Dream:
         # Default True keeps the #3212 behavior; set False to feed MEMORY.md raw
         # (e.g. if a specific LLM reacts poorly to the `← Nd` suffix).
         self.annotate_line_ages = annotate_line_ages
+        self.notify = notify
         self._runner = AgentRunner(provider)
         self._tools = self._build_tools()
 
@@ -1185,6 +1187,7 @@ class Dream:
             )
 
         # Git auto-commit (only when there are actual changes)
+        sha: str | None = None
         if changelog and self.store.git.is_initialized():
             ts = batch[-1]["timestamp"]
             summary = f"dream: {ts}, {len(changelog)} change(s)"
@@ -1192,5 +1195,15 @@ class Dream:
             sha = self.store.git.auto_commit(commit_msg)
             if sha:
                 logger.info("Dream commit: {}", sha)
+
+        # Notify (e.g. Feishu) after commit
+        if changelog and self.notify:
+            lines = "\n".join(f"- {c}" for c in changelog)
+            restore_hint = f"\n\n如需还原：/dream-restore {sha}" if sha else ""
+            msg = f"Dream 记忆整理完成\n\n变更内容：\n{lines}{restore_hint}"
+            try:
+                await self.notify(msg)
+            except Exception:
+                logger.exception("Dream notification failed")
 
         return True

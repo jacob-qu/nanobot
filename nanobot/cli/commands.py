@@ -705,11 +705,25 @@ def gateway(
         """Execute a cron job through the agent."""
         # Dream is an internal job — run directly, not through the agent loop.
         if job.name == "dream":
+            dream_cfg = config.agents.defaults.dream
+            if dream_cfg.deliver and dream_cfg.to:
+                from nanobot.bus.events import OutboundMessage
+
+                async def _dream_notify(content: str) -> None:
+                    await bus.publish_outbound(OutboundMessage(
+                        channel=dream_cfg.channel or "cli",
+                        chat_id=dream_cfg.to,  # type: ignore[arg-type]
+                        content=content,
+                    ))
+
+                agent.dream.notify = _dream_notify
             try:
                 await agent.dream.run()
                 logger.info("Dream cron job completed")
             except Exception:
                 logger.exception("Dream cron job failed")
+            finally:
+                agent.dream.notify = None
             return None
 
         from nanobot.agent.tools.cron import CronTool
