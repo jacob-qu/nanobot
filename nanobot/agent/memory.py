@@ -519,17 +519,25 @@ class MemoryStore:
             logger.warning("Backfill embed_batch failed; will retry later")
             return 0
 
-        for row, vec in zip(rows, vectors, strict=True):
+        if len(vectors) != len(rows):
+            logger.warning(
+                "Backfill: embed_batch returned {} vectors for {} texts; "
+                "processing only the overlap",
+                len(vectors), len(rows),
+            )
+        inserted = 0
+        for row, vec in zip(rows, vectors):
             try:
                 blob = struct.pack(f"{len(vec)}f", *vec)
                 db.execute(
                     "INSERT OR REPLACE INTO history_vec(rowid, embedding) VALUES (?, ?)",
                     (row["cursor"], blob),
                 )
+                inserted += 1
             except Exception:
                 logger.warning("Backfill failed for cursor={}", row["cursor"])
         db.commit()
-        return len(rows)
+        return inserted
 
     def read_unprocessed_history(self, since_cursor: int) -> list[dict[str, Any]]:
         """Return history entries with cursor > *since_cursor*."""
@@ -557,6 +565,11 @@ class MemoryStore:
         ).fetchall()
         for row in to_delete:
             db.execute("DELETE FROM history_fts WHERE rowid = ?", (row[0],))
+            if self._vec_available:
+                try:
+                    db.execute("DELETE FROM history_vec WHERE rowid = ?", (row[0],))
+                except sqlite3.OperationalError:
+                    pass
         db.execute(
             "DELETE FROM history WHERE cursor < ("
             "  SELECT cursor FROM history ORDER BY cursor DESC LIMIT 1 OFFSET ?"

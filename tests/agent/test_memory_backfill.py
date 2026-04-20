@@ -77,3 +77,39 @@ class TestBackfillEmbeddings:
         # Should not raise
         count = await store.backfill_embeddings(svc)
         assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_backfill_tolerates_short_batch_response(self, tmp_path):
+        """If the embedding service returns fewer vectors than requested,
+        still commit the overlap instead of dropping everything."""
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        store.append_history("e1")
+        store.append_history("e2")
+        store.append_history("e3")
+        svc = _fake_embedding_service()
+        svc.embed_batch = AsyncMock(return_value=[[0.1] * 4, [0.2] * 4])  # only 2 of 3
+
+        count = await store.backfill_embeddings(svc)
+        assert count == 2
+        db = store._get_db()
+        n = db.execute("SELECT count(*) FROM history_vec").fetchone()[0]
+        assert n == 2
+
+
+class TestCompactHistoryCleansVec:
+    @pytest.mark.asyncio
+    async def test_compact_removes_vec_rows_for_deleted_history(self, tmp_path):
+        store = MemoryStore(tmp_path, embedding_dimensions=4, max_history_entries=2)
+        for i in range(5):
+            store.append_history(f"entry {i}")
+        svc = _fake_embedding_service()
+        await store.backfill_embeddings(svc, batch_size=10)
+
+        db = store._get_db()
+        assert db.execute("SELECT count(*) FROM history_vec").fetchone()[0] == 5
+
+        store.compact_history()  # keeps only last 2 rows
+        remaining_history = db.execute("SELECT count(*) FROM history").fetchone()[0]
+        remaining_vec = db.execute("SELECT count(*) FROM history_vec").fetchone()[0]
+        assert remaining_history == 2
+        assert remaining_vec == 2
