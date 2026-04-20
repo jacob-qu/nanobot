@@ -489,6 +489,48 @@ class MemoryStore:
             )
             return False
 
+    async def backfill_embeddings(
+        self,
+        embedding_service: "EmbeddingService | None",
+        batch_size: int = 20,
+    ) -> int:
+        """Backfill embeddings for history entries that lack a vector.
+
+        Processes one batch per call (up to *batch_size*). Returns the number
+        of rows actually embedded. Designed to be called repeatedly from the
+        Dream cycle for gradual backfill.
+        """
+        if not self.vec_available or embedding_service is None:
+            return 0
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT cursor, content FROM history "
+            "WHERE cursor NOT IN (SELECT rowid FROM history_vec) "
+            "ORDER BY cursor LIMIT ?",
+            (batch_size,),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        texts = [r["content"] for r in rows]
+        try:
+            vectors = await embedding_service.embed_batch(texts)
+        except Exception:
+            logger.warning("Backfill embed_batch failed; will retry later")
+            return 0
+
+        for row, vec in zip(rows, vectors, strict=True):
+            try:
+                blob = struct.pack(f"{len(vec)}f", *vec)
+                db.execute(
+                    "INSERT OR REPLACE INTO history_vec(rowid, embedding) VALUES (?, ?)",
+                    (row["cursor"], blob),
+                )
+            except Exception:
+                logger.warning("Backfill failed for cursor={}", row["cursor"])
+        db.commit()
+        return len(rows)
+
     def read_unprocessed_history(self, since_cursor: int) -> list[dict[str, Any]]:
         """Return history entries with cursor > *since_cursor*."""
         db = self._get_db()
