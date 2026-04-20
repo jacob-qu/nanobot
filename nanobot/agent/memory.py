@@ -30,6 +30,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.utils.gitstore import GitStore
 
 if TYPE_CHECKING:
+    from nanobot.agent.embedding import EmbeddingService
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
 
@@ -433,6 +434,35 @@ class MemoryStore:
         db.commit()
         return rowid
 
+    async def embed_and_store(
+        self,
+        rowid: int,
+        text: str,
+        embedding_service: "EmbeddingService | None",
+    ) -> bool:
+        """Generate embedding for *text* and store it in history_vec.
+
+        Returns True on success, False on any failure (caller-agnostic).
+        Never raises — embedding is best-effort, FTS5 remains the fallback.
+        """
+        if not self.vec_available or embedding_service is None:
+            return False
+        try:
+            vec = await embedding_service.embed(text)
+            blob = struct.pack(f"{len(vec)}f", *vec)
+            db = self._get_db()
+            db.execute(
+                "INSERT OR REPLACE INTO history_vec(rowid, embedding) VALUES (?, ?)",
+                (rowid, blob),
+            )
+            db.commit()
+            return True
+        except Exception:
+            logger.warning(
+                "Embedding failed for history rowid={}; FTS5-only for this entry", rowid,
+            )
+            return False
+
     def read_unprocessed_history(self, since_cursor: int) -> list[dict[str, Any]]:
         """Return history entries with cursor > *since_cursor*."""
         db = self._get_db()
@@ -537,15 +567,20 @@ class MemoryStore:
             )
         return "\n".join(lines)
 
-    def raw_archive(self, messages: list[dict]) -> None:
-        """Fallback: dump raw messages to history.jsonl without LLM summarization."""
-        self.append_history(
+    def raw_archive(self, messages: list[dict]) -> int:
+        """Fallback: dump raw messages to history without LLM summarization.
+
+        Returns the rowid so callers in async context can schedule embedding.
+        """
+        summary = (
             f"[RAW] {len(messages)} messages\n"
             f"{self._format_messages(messages)}"
         )
+        cursor = self.append_history(summary)
         logger.warning(
             "Memory consolidation degraded: raw-archived {} messages", len(messages)
         )
+        return cursor
 
 
 
@@ -578,6 +613,7 @@ class Consolidator:
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         max_completion_tokens: int = 4096,
+        embedding_service: "EmbeddingService | None" = None,
     ):
         self.store = store
         self.provider = provider
@@ -593,6 +629,7 @@ class Consolidator:
         )
         self._previous_summary: dict[str, str | None] = {}
         self._summary_failure_cooldown: dict[str, float] = {}
+        self.embedding_service = embedding_service
 
     def _prune_old_tool_results(
         self,
@@ -843,7 +880,8 @@ class Consolidator:
                 self._previous_summary[session_key] = summary
                 self._summary_failure_cooldown.pop(session_key, None)
 
-            self.store.append_history(summary)
+            cursor = self.store.append_history(summary)
+            await self.store.embed_and_store(cursor, summary, self.embedding_service)
             return f"{self._COMPACTION_PREFIX}{summary}"
         except Exception:
             logger.warning("Consolidation LLM call failed, raw-dumping to history")
@@ -851,7 +889,12 @@ class Consolidator:
                 self._summary_failure_cooldown[session_key] = (
                     time.monotonic() + self._SUMMARY_FAILURE_COOLDOWN_SECONDS
                 )
-            self.store.raw_archive(messages)
+            cursor = self.store.raw_archive(messages)
+            await self.store.embed_and_store(
+                cursor,
+                self.store._format_messages(messages)[:4096],
+                self.embedding_service,
+            )
             return None
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:

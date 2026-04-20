@@ -495,3 +495,51 @@ class TestMemoryVecTable:
             "SELECT value FROM metadata WHERE key='embedding_dimensions'"
         ).fetchone()
         assert dim_row[0] == "8"
+
+
+class TestEmbedAndStore:
+    @pytest.fixture
+    def fake_embedding(self):
+        """Fake EmbeddingService yielding deterministic 4-dim vectors."""
+        from unittest.mock import AsyncMock
+        svc = type("FakeEmbed", (), {})()
+        svc.dimensions = 4
+        svc.embed = AsyncMock(return_value=[0.1, 0.2, 0.3, 0.4])
+        svc.embed_batch = AsyncMock(
+            return_value=[[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]
+        )
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_embed_and_store_writes_vector(self, tmp_path, fake_embedding):
+        from nanobot.agent.memory import MemoryStore
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        cursor = store.append_history("hello")
+        await store.embed_and_store(cursor, "hello", fake_embedding)
+        db = store._get_db()
+        row = db.execute(
+            "SELECT rowid FROM history_vec WHERE rowid = ?", (cursor,),
+        ).fetchone()
+        assert row is not None
+        fake_embedding.embed.assert_awaited_once_with("hello")
+
+    @pytest.mark.asyncio
+    async def test_embed_and_store_silent_on_failure(self, tmp_path, fake_embedding):
+        from unittest.mock import AsyncMock
+        from nanobot.agent.memory import MemoryStore
+        fake_embedding.embed = AsyncMock(side_effect=RuntimeError("api down"))
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        cursor = store.append_history("hello")
+        # Should NOT raise
+        await store.embed_and_store(cursor, "hello", fake_embedding)
+        # And the history entry is still queryable via FTS5
+        results = store.search_history("hello")
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_embed_and_store_noop_when_vec_disabled(self, tmp_path, fake_embedding):
+        from nanobot.agent.memory import MemoryStore
+        store = MemoryStore(tmp_path)  # no embedding_dimensions
+        cursor = store.append_history("hello")
+        await store.embed_and_store(cursor, "hello", fake_embedding)
+        fake_embedding.embed.assert_not_awaited()
