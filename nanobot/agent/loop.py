@@ -15,6 +15,7 @@ from loguru import logger
 
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.embedding import EmbeddingService
 from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
@@ -164,6 +165,7 @@ class AgentLoop:
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
         tools_config: ToolsConfig | None = None,
+        embedding_service: "EmbeddingService | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
@@ -199,7 +201,18 @@ class AgentLoop:
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
-        self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
+        self._embedding_service = embedding_service
+        embedding_dims = (
+            self._embedding_service.dimensions
+            if self._embedding_service is not None
+            else None
+        )
+        self.context = ContextBuilder(
+            workspace,
+            timezone=timezone,
+            disabled_skills=disabled_skills,
+            embedding_dimensions=embedding_dims,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.runner = AgentRunner(provider)
@@ -241,6 +254,7 @@ class AgentLoop:
             build_messages=self.context.build_messages,
             get_tool_definitions=self.tools.get_definitions,
             max_completion_tokens=provider.generation.max_tokens,
+            embedding_service=self._embedding_service,
         )
         self.auto_compact = AutoCompact(
             sessions=self.sessions,
@@ -306,7 +320,9 @@ class AgentLoop:
             self.tools.register(
                 CronTool(self.cron_service, default_timezone=self.context.timezone or "UTC")
             )
-        self.tools.register(SearchMemoryTool(store=self.context.memory))
+        self.tools.register(
+            SearchMemoryTool(store=self.context.memory, embedding=self._embedding_service)
+        )
         self.tools.register(
             ManageSkillTool(
                 workspace_dir=self.workspace,

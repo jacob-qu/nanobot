@@ -486,6 +486,39 @@ def _make_provider(config: Config):
     return provider
 
 
+def _build_embedding_service(config: Config):
+    """Build an EmbeddingService from config if enabled, else return None."""
+    embedding_cfg = config.agents.defaults.embedding
+    if not embedding_cfg.enabled:
+        return None
+
+    # Use configured provider or auto-match via model
+    p_name = embedding_cfg.provider if embedding_cfg.provider != "auto" else None
+    p = None
+    if p_name:
+        p = getattr(config.providers, p_name, None)
+    if p is None:
+        p = config.get_provider(embedding_cfg.model)
+    if p and p.api_key:
+        from nanobot.agent.embedding import EmbeddingService
+
+        console.print(
+            f"[green]✓[/green] Embedding: {embedding_cfg.model} "
+            f"({embedding_cfg.dimensions}d)"
+        )
+        return EmbeddingService(
+            api_key=p.api_key,
+            api_base=p.api_base,
+            model=embedding_cfg.model,
+            dimensions=embedding_cfg.dimensions,
+        )
+    console.print(
+        "[yellow]![/yellow] Embedding enabled but no provider with api_key found; "
+        "semantic search disabled"
+    )
+    return None
+
+
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import load_config, resolve_config_env_vars, set_config_path
@@ -582,6 +615,7 @@ def serve(
     bus = MessageBus()
     provider = _make_provider(runtime_config)
     session_manager = SessionManager(runtime_config.workspace_path)
+    embedding_service = _build_embedding_service(runtime_config)
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -603,6 +637,7 @@ def serve(
         disabled_skills=runtime_config.agents.defaults.disabled_skills,
         session_ttl_minutes=runtime_config.agents.defaults.session_ttl_minutes,
         tools_config=runtime_config.tools,
+        embedding_service=embedding_service,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -676,6 +711,7 @@ def gateway(
     cron = CronService(cron_store_path)
 
     # Create agent with cron service
+    embedding_service = _build_embedding_service(config)
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -698,6 +734,7 @@ def gateway(
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
         tools_config=config.tools,
+        embedding_service=embedding_service,
     )
 
     # Set cron callback (needs agent)
@@ -1020,6 +1057,7 @@ def agent(
         disabled_skills=config.agents.defaults.disabled_skills,
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
         tools_config=config.tools,
+        embedding_service=_build_embedding_service(config),
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
