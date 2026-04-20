@@ -543,3 +543,85 @@ class TestEmbedAndStore:
         cursor = store.append_history("hello")
         await store.embed_and_store(cursor, "hello", fake_embedding)
         fake_embedding.embed.assert_not_awaited()
+
+
+class TestHybridSearch:
+    @pytest.fixture
+    def seeded_store(self, tmp_path):
+        """Store with 3 entries; cursor 1 and 3 have matching vectors."""
+        from unittest.mock import AsyncMock
+        from nanobot.agent.memory import MemoryStore
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        fake_embed = type("FakeEmbed", (), {})()
+        fake_embed.dimensions = 4
+
+        # Cursor 1 and 3 are "close" to query vector [0.1, 0.1, 0.1, 0.1]
+        async def _embed(text):
+            return {
+                "deploy script request": [0.1, 0.1, 0.1, 0.15],
+                "login UI bug fix": [0.9, 0.9, 0.9, 0.9],
+                "CI/CD pipeline for deployment": [0.1, 0.1, 0.12, 0.1],
+                "deploy": [0.1, 0.1, 0.1, 0.1],  # query
+            }[text]
+
+        fake_embed.embed = AsyncMock(side_effect=_embed)
+        fake_embed.embed_batch = AsyncMock()
+
+        import asyncio
+        c1 = store.append_history("deploy script request")
+        c2 = store.append_history("login UI bug fix")
+        c3 = store.append_history("CI/CD pipeline for deployment")
+        asyncio.run(store.embed_and_store(c1, "deploy script request", fake_embed))
+        asyncio.run(store.embed_and_store(c2, "login UI bug fix", fake_embed))
+        asyncio.run(store.embed_and_store(c3, "CI/CD pipeline for deployment", fake_embed))
+        return store, fake_embed
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_returns_results(self, seeded_store):
+        store, fake_embed = seeded_store
+        results = await store.hybrid_search("deploy", fake_embed, limit=3)
+        assert len(results) > 0
+        for r in results:
+            assert "cursor" in r
+            assert "content" in r
+            assert "timestamp" in r
+            assert "source" in r  # "keyword" | "semantic" | "keyword+semantic"
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_semantic_boosts_related(self, seeded_store):
+        """Entry 3 ("CI/CD pipeline for deployment") doesn't contain keyword
+        'deploy' literally (as a single token), but is semantically close —
+        it should be ranked via the semantic side."""
+        store, fake_embed = seeded_store
+        results = await store.hybrid_search("deploy", fake_embed, limit=3)
+        cursors = [r["cursor"] for r in results]
+        # All 3 returned — the unrelated one (cursor 2) may or may not appear,
+        # but the two relevant ones (1 and 3) must
+        assert 1 in cursors
+        assert 3 in cursors
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_falls_back_when_embedding_fails(self, tmp_path):
+        from unittest.mock import AsyncMock
+        from nanobot.agent.memory import MemoryStore
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        store.append_history("deploy script here")
+        fake_embed = type("FakeEmbed", (), {})()
+        fake_embed.dimensions = 4
+        fake_embed.embed = AsyncMock(side_effect=RuntimeError("api down"))
+        # Should NOT raise; returns FTS5 results with degraded=True marker
+        results = await store.hybrid_search("deploy", fake_embed, limit=3)
+        assert len(results) >= 1
+        assert results[0]["source"] == "keyword"
+
+
+def test_rrf_merge_basic():
+    from nanobot.agent.memory import _rrf_merge
+    fts = [{"cursor": 1}, {"cursor": 2}, {"cursor": 3}]
+    vec = [{"rowid": 3}, {"rowid": 2}, {"rowid": 4}]
+    merged = _rrf_merge(fts, vec, k=60)
+    # 3 appears in both — should rank top
+    assert merged[0][0] == 3
+    # cursors 1 (only fts), 2 (both), 3 (both), 4 (only vec) all included
+    all_cursors = {row[0] for row in merged}
+    assert all_cursors == {1, 2, 3, 4}

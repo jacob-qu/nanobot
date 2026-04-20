@@ -39,6 +39,32 @@ if TYPE_CHECKING:
 # MemoryStore — pure file I/O layer
 # ---------------------------------------------------------------------------
 
+def _rrf_merge(
+    fts_results: list[dict[str, Any]],
+    vec_results: list[dict[str, Any]],
+    k: int = 60,
+) -> list[tuple[int, float, set[str]]]:
+    """Reciprocal Rank Fusion: merge two ranked lists into a combined ranking.
+
+    Returns: list of (cursor, fused_score, source_set) sorted by score desc.
+    source_set contains {"keyword"}, {"semantic"}, or both.
+    """
+    scores: dict[int, float] = {}
+    sources: dict[int, set[str]] = {}
+    for rank, r in enumerate(fts_results):
+        cur = r["cursor"]
+        scores[cur] = scores.get(cur, 0.0) + 1.0 / (k + rank + 1)
+        sources.setdefault(cur, set()).add("keyword")
+    for rank, r in enumerate(vec_results):
+        cur = r["rowid"]
+        scores[cur] = scores.get(cur, 0.0) + 1.0 / (k + rank + 1)
+        sources.setdefault(cur, set()).add("semantic")
+    return sorted(
+        ((cur, score, sources[cur]) for cur, score in scores.items()),
+        key=lambda x: -x[1],
+    )
+
+
 class MemoryStore:
     """Pure file I/O for memory files: MEMORY.md, history (SQLite), SOUL.md, USER.md."""
 
@@ -531,6 +557,71 @@ class MemoryStore:
             (self._cjk_space(query), limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    async def hybrid_search(
+        self,
+        query: str,
+        embedding_service: "EmbeddingService",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """FTS5 keyword search + vector semantic search, merged via RRF.
+
+        Each result dict: {cursor, timestamp, content, source}
+        where source is "keyword" / "semantic" / "keyword+semantic".
+        """
+        limit = min(max(1, limit), 20)
+        candidate_k = limit * 2
+
+        fts_results = self.search_history(query, limit=candidate_k)
+
+        vec_results: list[dict[str, Any]] = []
+        if self.vec_available and embedding_service is not None:
+            try:
+                qvec = await embedding_service.embed(query)
+                blob = struct.pack(f"{len(qvec)}f", *qvec)
+                db = self._get_db()
+                rows = db.execute(
+                    "SELECT rowid, distance FROM history_vec "
+                    "WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                    (blob, candidate_k),
+                ).fetchall()
+                vec_results = [dict(r) for r in rows]
+            except Exception:
+                logger.warning("Semantic search failed; falling back to FTS5-only")
+
+        if not vec_results:
+            # Pure FTS5 result
+            out = []
+            for r in fts_results:
+                d = dict(r)
+                d["source"] = "keyword"
+                out.append(d)
+            return out[:limit]
+
+        merged = _rrf_merge(fts_results, vec_results)[:limit]
+        cursors = [c for c, _, _ in merged]
+        if not cursors:
+            return []
+
+        # Fetch content for chosen cursors in one query
+        placeholders = ",".join("?" * len(cursors))
+        db = self._get_db()
+        rows = db.execute(
+            f"SELECT cursor, timestamp, content FROM history WHERE cursor IN ({placeholders})",
+            cursors,
+        ).fetchall()
+        by_cursor = {r["cursor"]: dict(r) for r in rows}
+
+        out = []
+        for cur, score, src_set in merged:
+            row = by_cursor.get(cur)
+            if not row:
+                continue
+            src_str = "keyword+semantic" if len(src_set) == 2 else next(iter(src_set))
+            row["source"] = src_str
+            row["score"] = score
+            out.append(row)
+        return out
 
     def query_history(self, since: str | None = None, until: str | None = None,
                       limit: int = 50) -> list[dict[str, Any]]:
