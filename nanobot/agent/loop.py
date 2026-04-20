@@ -266,6 +266,7 @@ class AgentLoop:
             store=self.context.memory,
             provider=provider,
             model=self.model,
+            embedding_service=self._embedding_service,
         )
         self._register_default_tools()
         if _tc.my.enable:

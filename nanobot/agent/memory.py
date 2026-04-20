@@ -1186,6 +1186,7 @@ class Dream:
         max_tool_result_chars: int = 16_000,
         annotate_line_ages: bool = True,
         notify: Callable[[str], Awaitable[None]] | None = None,
+        embedding_service: "EmbeddingService | None" = None,
     ):
         self.store = store
         self.provider = provider
@@ -1198,6 +1199,7 @@ class Dream:
         # (e.g. if a specific LLM reacts poorly to the `← Nd` suffix).
         self.annotate_line_ages = annotate_line_ages
         self.notify = notify
+        self.embedding_service = embedding_service
         self._runner = AgentRunner(provider)
         self._tools = self._build_tools()
 
@@ -1453,5 +1455,16 @@ class Dream:
                 await self.notify(msg)
             except Exception:
                 logger.exception("Dream notification failed")
+
+        # Opportunistic embedding backfill (best-effort, won't raise)
+        try:
+            if self.embedding_service is not None:
+                n = await self.store.backfill_embeddings(
+                    self.embedding_service, batch_size=20,
+                )
+                if n:
+                    logger.info("Dream backfilled embeddings for {} entries", n)
+        except Exception:
+            logger.exception("Backfill in Dream cycle failed (non-fatal)")
 
         return True
