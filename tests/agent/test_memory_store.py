@@ -456,3 +456,42 @@ class TestJSONLToSQLiteMigration:
         store = MemoryStore(tmp_path)
         results = store.search_history("部署")
         assert len(results) == 1
+
+
+class TestMemoryVecTable:
+    def test_vec_available_when_dimensions_set(self, tmp_path):
+        from nanobot.agent.memory import MemoryStore
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        assert store.vec_available is True
+
+    def test_vec_available_false_when_no_dimensions(self, tmp_path):
+        from nanobot.agent.memory import MemoryStore
+        store = MemoryStore(tmp_path)
+        assert store.vec_available is False
+
+    def test_vec_table_created_with_configured_dimensions(self, tmp_path):
+        from nanobot.agent.memory import MemoryStore
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        # Force DB init
+        store.append_history("seed")
+        db = store._get_db()
+        row = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='history_vec'"
+        ).fetchone()
+        assert row is not None
+
+    def test_vec_table_rebuilt_when_dimensions_change(self, tmp_path):
+        from nanobot.agent.memory import MemoryStore
+        store1 = MemoryStore(tmp_path, embedding_dimensions=4)
+        store1.append_history("seed")
+        # Close before re-opening with different dim
+        store1._db.close()
+        store1._db = None
+
+        store2 = MemoryStore(tmp_path, embedding_dimensions=8)
+        store2.append_history("seed2")
+        db = store2._get_db()
+        dim_row = db.execute(
+            "SELECT value FROM metadata WHERE key='embedding_dimensions'"
+        ).fetchone()
+        assert dim_row[0] == "8"

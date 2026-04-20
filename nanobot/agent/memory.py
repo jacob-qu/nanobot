@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import sqlite3
+import struct
 import time
 import weakref
 from datetime import datetime
@@ -13,6 +14,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
+
+try:
+    import sqlite_vec
+    _SQLITE_VEC_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    sqlite_vec = None
+    _SQLITE_VEC_AVAILABLE = False
 
 from nanobot.utils.prompt_templates import render_template
 from nanobot.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain, strip_think
@@ -40,9 +48,15 @@ class MemoryStore:
         r"^\[\d{4}-\d{2}-\d{2}[^\]]*\]\s+[A-Z][A-Z0-9_]*(?:\s+\[tools:\s*[^\]]+\])?:"
     )
 
-    def __init__(self, workspace: Path, max_history_entries: int = _DEFAULT_MAX_HISTORY):
+    def __init__(
+        self,
+        workspace: Path,
+        max_history_entries: int = _DEFAULT_MAX_HISTORY,
+        embedding_dimensions: int | None = None,
+    ):
         self.workspace = workspace
         self.max_history_entries = max_history_entries
+        self.embedding_dimensions = embedding_dimensions
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "history.jsonl"
@@ -55,12 +69,20 @@ class MemoryStore:
             "SOUL.md", "USER.md", "memory/MEMORY.md",
         ])
         self._db: sqlite3.Connection | None = None
+        self._vec_available: bool = False
         self._maybe_migrate_legacy_history()   # HISTORY.md → SQLite
         self._maybe_migrate_jsonl_to_sqlite()  # history.jsonl → SQLite
 
     @property
     def git(self) -> GitStore:
         return self._git
+
+    @property
+    def vec_available(self) -> bool:
+        """True when sqlite-vec loaded and embedding_dimensions is configured."""
+        # Force lazy init so _vec_available is populated.
+        self._get_db()
+        return self._vec_available
 
     # -- generic helpers -----------------------------------------------------
 
@@ -280,8 +302,24 @@ class MemoryStore:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.row_factory = sqlite3.Row
+            self._load_vec_extension()
             self._init_db()
         return self._db
+
+    def _load_vec_extension(self) -> None:
+        """Load sqlite-vec extension into the active connection (best-effort)."""
+        if not _SQLITE_VEC_AVAILABLE or self.embedding_dimensions is None:
+            return
+        try:
+            self._db.enable_load_extension(True)
+            sqlite_vec.load(self._db)
+            self._db.enable_load_extension(False)
+            self._vec_available = True
+        except Exception:
+            logger.warning(
+                "sqlite-vec extension failed to load; semantic search disabled"
+            )
+            self._vec_available = False
 
     def _init_db(self) -> None:
         """Create tables and triggers if they don't exist."""
@@ -310,7 +348,41 @@ class MemoryStore:
             """)
         except sqlite3.OperationalError:
             logger.warning("FTS5 extension not available; full-text search will be disabled")
+
+        if self._vec_available and self.embedding_dimensions is not None:
+            self._init_vec_table(db)
         db.commit()
+
+    def _init_vec_table(self, db: sqlite3.Connection) -> None:
+        """Create history_vec virtual table; rebuild if embedding_dimensions changed."""
+        prev_row = db.execute(
+            "SELECT value FROM metadata WHERE key='embedding_dimensions'"
+        ).fetchone()
+        prev = int(prev_row[0]) if prev_row else None
+        dim = self.embedding_dimensions
+
+        if prev is not None and prev != dim:
+            logger.info(
+                "Embedding dimensions changed ({} -> {}); rebuilding history_vec",
+                prev, dim,
+            )
+            db.execute("DROP TABLE IF EXISTS history_vec")
+
+        try:
+            db.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS history_vec USING vec0("
+                f"embedding float[{dim}] distance_metric=cosine)"
+            )
+        except sqlite3.OperationalError:
+            logger.warning("sqlite-vec CREATE failed; semantic search disabled")
+            self._vec_available = False
+            return
+
+        db.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES "
+            "('embedding_dimensions', ?)",
+            (str(dim),),
+        )
 
     # -- MEMORY.md (long-term facts) -----------------------------------------
 
