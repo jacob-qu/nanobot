@@ -48,3 +48,39 @@ class TestSearchMemoryTool:
     def test_schema_has_required_query(self, tool):
         schema = tool.parameters
         assert "query" in schema.get("required", [])
+
+
+class TestSearchMemoryHybrid:
+    @pytest.fixture
+    def fake_embedding(self):
+        from unittest.mock import AsyncMock
+        svc = type("FakeEmbed", (), {})()
+        svc.dimensions = 4
+        svc.embed = AsyncMock(return_value=[0.1, 0.1, 0.1, 0.1])
+        svc.embed_batch = AsyncMock()
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_hybrid_mode_when_embedding_provided(self, tmp_path, fake_embedding):
+        from nanobot.agent.memory import MemoryStore
+        from nanobot.agent.tools.search_memory import SearchMemoryTool
+
+        store = MemoryStore(tmp_path, embedding_dimensions=4)
+        c1 = store.append_history("deploy script")
+        await store.embed_and_store(c1, "deploy script", fake_embedding)
+
+        tool = SearchMemoryTool(store=store, embedding=fake_embedding)
+        result = await tool.execute(query="deploy")
+        assert "deploy" in result
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_keyword_when_no_embedding(self, tmp_path):
+        from nanobot.agent.memory import MemoryStore
+        from nanobot.agent.tools.search_memory import SearchMemoryTool
+
+        store = MemoryStore(tmp_path)  # vec disabled
+        store.append_history("deploy script")
+        tool = SearchMemoryTool(store=store, embedding=None)
+        result = await tool.execute(query="deploy")
+        assert "deploy" in result
+        assert "Found" in result

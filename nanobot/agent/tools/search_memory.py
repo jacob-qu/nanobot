@@ -1,4 +1,4 @@
-"""Search memory tool: full-text search over conversation history."""
+"""Search memory tool: full-text + semantic search over conversation history."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
 
 if TYPE_CHECKING:
+    from nanobot.agent.embedding import EmbeddingService
     from nanobot.agent.memory import MemoryStore
 
 _MAX_CONTENT_DISPLAY = 200
@@ -16,7 +17,7 @@ _MAX_RESULTS = 20
 
 @tool_parameters(
     tool_parameters_schema(
-        query=StringSchema("Search keywords or phrase"),
+        query=StringSchema("Search query — keywords or a natural-language description"),
         limit=IntegerSchema(
             description="Maximum number of results to return (default 5, max 20)",
         ),
@@ -24,10 +25,15 @@ _MAX_RESULTS = 20
     )
 )
 class SearchMemoryTool(Tool):
-    """Tool to search conversation history via full-text search."""
+    """Search conversation history via keyword (FTS5) + semantic (embedding) hybrid."""
 
-    def __init__(self, store: MemoryStore):
+    def __init__(
+        self,
+        store: "MemoryStore",
+        embedding: "EmbeddingService | None" = None,
+    ):
         self._store = store
+        self._embedding = embedding
 
     @property
     def name(self) -> str:
@@ -36,9 +42,10 @@ class SearchMemoryTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search past conversation history. Use when the user references "
-            "previous conversations, past requests, or when you need to recall "
-            "what was discussed before."
+            "Search past conversation history. Accepts either keywords or a "
+            "natural-language description of what to find (semantic search "
+            "is used when available). Use when the user references previous "
+            "conversations or you need to recall past context."
         )
 
     @property
@@ -47,21 +54,35 @@ class SearchMemoryTool(Tool):
 
     async def execute(self, query: str, limit: int = 5, **kwargs: Any) -> str:
         limit = min(max(1, limit), _MAX_RESULTS)
+        hybrid = self._embedding is not None and self._store.vec_available
         try:
-            results = self._store.search_history(query, limit=limit)
+            if hybrid:
+                results = await self._store.hybrid_search(
+                    query, self._embedding, limit=limit,
+                )
+            else:
+                results = self._store.search_history(query, limit=limit)
         except Exception as e:
             return f"Error searching memory: {e}"
 
         if not results:
             return f'No results found for "{query}".'
 
-        lines = [f'Found {len(results)} result(s) for "{query}":\n']
+        mode_label = "hybrid" if hybrid else "keyword"
+        lines = [f'Found {len(results)} result(s) for "{query}" ({mode_label}):\n']
         for r in results:
             content = r["content"]
             if len(content) > _MAX_CONTENT_DISPLAY:
                 content = content[:_MAX_CONTENT_DISPLAY] + "..."
-            rank = r.get("rank", 0)
-            lines.append(f"[{r['timestamp']}] (relevance: {-rank:.2f})")
+            src = r.get("source", "")
+            src_label = f" [{src}]" if src else ""
+            if "score" in r:
+                meta = f" (score: {r['score']:.3f})"
+            elif "rank" in r:
+                meta = f" (relevance: {-r['rank']:.2f})"
+            else:
+                meta = ""
+            lines.append(f"[{r['timestamp']}]{src_label}{meta}")
             lines.append(content)
             lines.append("")
         return "\n".join(lines).rstrip()
