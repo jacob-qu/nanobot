@@ -76,6 +76,15 @@ class CronConfig(Base):
     )
 
 
+class EmbeddingConfig(Base):
+    """Embedding 服务配置（语义搜索用）。"""
+
+    enabled: bool = False  # 显式开启语义搜索
+    model: str = "text-embedding-3-small"  # embedding 模型名
+    dimensions: int = 1536  # 向量维度
+    provider: str = "auto"  # 取哪个 provider 的 key/base；auto = 按 model 匹配
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -102,6 +111,7 @@ class AgentDefaults(Base):
         serialization_alias="idleCompactAfterMinutes",
     )  # Auto-compact idle threshold in minutes (0 = disabled)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
 
 
