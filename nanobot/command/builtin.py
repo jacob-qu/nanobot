@@ -145,6 +145,38 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_memory_reindex(ctx: CommandContext) -> OutboundMessage:
+    """Manually trigger full embedding backfill over all history entries."""
+    loop = ctx.loop
+    msg = ctx.msg
+    store = loop.context.memory
+    svc = loop._embedding_service
+
+    if svc is None or not store.vec_available:
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content="Memory reindex unavailable: embedding service not configured.",
+        )
+
+    async def _run():
+        total = 0
+        while True:
+            n = await store.backfill_embeddings(svc, batch_size=50)
+            total += n
+            if n == 0:
+                break
+        await loop.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id,
+            content=f"Memory reindex complete: {total} entries indexed.",
+        ))
+
+    asyncio.create_task(_run())
+    return OutboundMessage(
+        channel=msg.channel, chat_id=msg.chat_id,
+        content="Memory reindex started in background...",
+    )
+
+
 def _extract_changed_files(diff: str) -> list[str]:
     """Extract changed file paths from a unified diff."""
     files: list[str] = []
@@ -334,6 +366,7 @@ def build_help_text() -> str:
         "/dream — Manually trigger Dream consolidation",
         "/dream-log — Show what the last Dream changed",
         "/dream-restore — Revert memory to a previous state",
+        "/memory-reindex — Backfill vector index for past conversations",
         "/help — Show available commands",
     ]
     return "\n".join(lines)
@@ -351,4 +384,5 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/dream-log ", cmd_dream_log)
     router.exact("/dream-restore", cmd_dream_restore)
     router.prefix("/dream-restore ", cmd_dream_restore)
+    router.exact("/memory-reindex", cmd_memory_reindex)
     router.exact("/help", cmd_help)
