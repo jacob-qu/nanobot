@@ -97,38 +97,76 @@ class TestListOpenIssuesTool:
 
 class TestTriggerDreamTool:
     @pytest.mark.asyncio
-    async def test_execute_calls_dream_run_in_background(self):
-        import asyncio as _asyncio
-
+    async def test_execute_awaits_dream_and_reports_result(self):
         from nanobot.agent.tools.memory_query import TriggerDreamTool
 
         calls: list[int] = []
 
         class _FakeDream:
+            reconcile_engine = None  # no engine → tool reports minimal
+
             async def run(self):
                 calls.append(1)
+                return True
 
         tool = TriggerDreamTool(_FakeDream())
-        result = await tool.execute(reason="test")
-        # Should return immediately (fire-and-forget)
-        assert "Dream 已在后台启动" in result
-        assert "test" in result
-        # Give the background task one event loop tick to run
-        await _asyncio.sleep(0.05)
+        result = await tool.execute(reason="test reason")
+        # Tool synchronously awaits Dream, then reports
         assert calls == [1]
+        assert "Dream run 完成" in result
+        assert "did_work=True" in result
+        assert "test reason" in result
+
+    @pytest.mark.asyncio
+    async def test_execute_reports_reconcile_outcome(self, tmp_path: Path):
+        from nanobot.agent.memory_index import ConsistencyIssue, MemoryIndex
+        from nanobot.agent.tools.memory_query import TriggerDreamTool
+
+        idx = MemoryIndex(db_path=tmp_path / "idx.db", embedding_dim=1536)
+        # Seed 2 open issues
+        now = int(time.time())
+        idx.add_issue(ConsistencyIssue(
+            id="", trigger_event="edit", trigger_ref=None,
+            issue_type="impact_unreviewed", subject_ids="[]",
+            description="one", severity="medium", status="open",
+            resolution=None, created_at=now, resolved_at=None,
+        ))
+        idx.add_issue(ConsistencyIssue(
+            id="", trigger_event="edit", trigger_ref=None,
+            issue_type="impact_unreviewed", subject_ids="[]",
+            description="two", severity="high", status="open",
+            resolution=None, created_at=now, resolved_at=None,
+        ))
+        idx.set_meta("last_reconciled_commit", "abcdef1234567890")
+
+        class _FakeEngine:
+            def __init__(self, index):
+                self._index = index
+
+        class _FakeDream:
+            def __init__(self, engine):
+                self.reconcile_engine = engine
+
+            async def run(self):
+                return False  # no-op, issues were pre-seeded
+
+        tool = TriggerDreamTool(_FakeDream(_FakeEngine(idx)))
+        result = await tool.execute()
+        assert "Dream 完成" in result
+        assert "告警 2 条" in result
+        assert "abcdef12" in result  # watermark short sha
 
     @pytest.mark.asyncio
     async def test_execute_swallows_dream_exceptions(self):
-        import asyncio as _asyncio
-
         from nanobot.agent.tools.memory_query import TriggerDreamTool
 
         class _BadDream:
+            reconcile_engine = None
+
             async def run(self):
                 raise RuntimeError("boom")
 
         tool = TriggerDreamTool(_BadDream())
-        # Should not raise even though dream will raise
         result = await tool.execute()
-        assert "Dream 已在后台启动" in result
-        await _asyncio.sleep(0.05)
+        # Error is reported, not raised
+        assert "Dream 执行失败" in result and "boom" in result

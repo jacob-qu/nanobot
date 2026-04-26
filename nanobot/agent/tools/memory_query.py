@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -288,12 +287,13 @@ class TriggerDreamTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "在后台启动一轮 Dream（记忆整理 + 一致性 reconcile）。"
-            "**当你刚刚修改了 MEMORY.md 或用户要求 'reconcile'/'整理记忆'/'跑一次 dream' 时，"
-            "必须调用此工具**，不要 spawn subagent 自己模拟 reconcile。"
-            "此工具会真正调用 Dream Phase 3 的 ReconcileEngine，产出的一致性告警会写入 "
-            "consistency_issues 表，用户随后可通过 `list_open_issues` 查询。"
-            "工具立即返回，Dream 结果会通过 notify 通道（飞书等）异步推送。"
+            "触发一轮 Dream（记忆整理 + Phase 3 reconcile 一致性检查），**同步等待 reconcile 完成**"
+            "并返回结构化结果（变更条目数、告警数）。"
+            "**当你刚刚修改了 MEMORY.md，或用户要求 'reconcile'/'整理记忆'/'跑一次 dream'/"
+            "'确认一下记忆状态' 时，必须调用此工具**，不要 spawn subagent 自己模拟，"
+            "也不要基于之前对话里的 trigger_dream 结果猜测 '已经处理完'——每次修改都需要一次新的 reconcile。"
+            "工具内部会：检测 MEMORY.md 是否 dirty → 必要时 auto_commit → 对比 last_reconciled_commit → "
+            "跑概念/关联/影响复核 → 写 consistency_issues。告警详情请随后用 `list_open_issues` 读取。"
         )
 
     @property
@@ -302,15 +302,30 @@ class TriggerDreamTool(Tool):
         return False
 
     async def execute(self, reason: str = "", **kwargs: Any) -> str:
-        async def _run():
-            try:
-                await self._dream.run()
-            except Exception:
-                logger.exception("Dream (via trigger_dream tool) failed")
+        tail = f"\n\n原因：{reason}" if reason else ""
+        try:
+            # Synchronous: wait for Dream/reconcile so the LLM sees the real outcome
+            # (and doesn't hallucinate "已经处理完" based on prior conversation turns).
+            did_work = await self._dream.run()
+        except Exception as e:
+            logger.exception("Dream (via trigger_dream tool) failed")
+            return f"Dream 执行失败：{e}{tail}"
 
-        asyncio.create_task(_run())
-        tail = f"（原因：{reason}）" if reason else ""
+        # Read outcome from index
+        engine = getattr(self._dream, "reconcile_engine", None)
+        if engine is None:
+            return (
+                f"Dream run 完成（did_work={did_work}）。"
+                f"memory_index 未启用，无 reconcile 结果。{tail}"
+            )
+        idx = engine._index  # type: ignore[attr-defined]
+        open_issues = len(idx.list_open_issues(severity_min="low"))
+        watermark = idx.get_meta("last_reconciled_commit") or "(none)"
+        short_wm = watermark[:8] if watermark != "(none)" else watermark
         return (
-            f"Dream 已在后台启动{tail}。完成后 reconcile 报告会通过飞书推送；"
-            "如需查看本轮产出的一致性告警，稍后用 list_open_issues。"
+            f"Dream 完成。Phase 1/2 did_work={did_work}，"
+            f"reconcile 水位线 last_reconciled_commit={short_wm}，"
+            f"当前未处理告警 {open_issues} 条。"
+            f"{'详情用 list_open_issues 查看。' if open_issues else ''}"
+            f"{tail}"
         )
