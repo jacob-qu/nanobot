@@ -362,6 +362,15 @@ class AgentLoop:
         self.tools.register(
             SearchMemoryTool(store=self.context.memory, embedding=self._embedding_service)
         )
+        if getattr(self, "_memory_index", None) is not None:
+            from nanobot.agent.tools.memory_query import (
+                GetMemoryConceptTool,
+                ListOpenIssuesTool,
+                QueryMemoryImpactTool,
+            )
+            self.tools.register(GetMemoryConceptTool(self._memory_index))
+            self.tools.register(QueryMemoryImpactTool(self._memory_index))
+            self.tools.register(ListOpenIssuesTool(self._memory_index))
         self.tools.register(
             ManageSkillTool(
                 workspace_dir=self.workspace,
