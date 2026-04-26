@@ -2,8 +2,61 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
+import struct
+import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass
+class ItemRecord:
+    id: str
+    source_file: str
+    section_path: str
+    item_type: str
+    content: str
+    content_hash: str
+    embedding: bytes | None
+    created_at: int
+    updated_at: int
+    removed_at: int | None
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _row_to_item(row: sqlite3.Row) -> ItemRecord:
+    return ItemRecord(
+        id=row["id"],
+        source_file=row["source_file"],
+        section_path=row["section_path"],
+        item_type=row["item_type"],
+        content=row["content"],
+        content_hash=row["content_hash"],
+        embedding=row["embedding"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        removed_at=row["removed_at"],
+    )
+
+
+def _unpack_floats(blob: bytes) -> list[float]:
+    n = len(blob) // 4
+    return list(struct.unpack(f"{n}f", blob))
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS memory_items (
@@ -123,6 +176,83 @@ class MemoryIndex:
             (key, value),
         )
         self._db.commit()
+
+    # ---- items ----
+    def upsert_item(self, item: ItemRecord) -> str:
+        if not item.id:
+            item.id = _new_id()
+            self._db.execute(
+                "INSERT INTO memory_items "
+                "(id, source_file, section_path, item_type, content, content_hash, "
+                " embedding, created_at, updated_at, removed_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (item.id, item.source_file, item.section_path, item.item_type,
+                 item.content, item.content_hash, item.embedding,
+                 item.created_at, item.updated_at, item.removed_at),
+            )
+        else:
+            self._db.execute(
+                "UPDATE memory_items SET source_file=?, section_path=?, item_type=?, "
+                "content=?, content_hash=?, embedding=?, updated_at=?, removed_at=? "
+                "WHERE id=?",
+                (item.source_file, item.section_path, item.item_type,
+                 item.content, item.content_hash, item.embedding,
+                 item.updated_at, item.removed_at, item.id),
+            )
+        self._db.commit()
+        return item.id
+
+    def tombstone_item(self, item_id: str) -> None:
+        now = int(time.time())
+        self._db.execute(
+            "UPDATE memory_items SET removed_at=?, updated_at=? WHERE id=? AND removed_at IS NULL",
+            (now, now, item_id),
+        )
+        self._db.commit()
+
+    def get_item(self, item_id: str) -> ItemRecord | None:
+        cur = self._db.execute("SELECT * FROM memory_items WHERE id=?", (item_id,))
+        row = cur.fetchone()
+        return _row_to_item(row) if row else None
+
+    def list_items(
+        self,
+        source_file: str | None = None,
+        alive: bool = True,
+    ) -> list[ItemRecord]:
+        clauses: list[str] = []
+        params: list = []
+        if source_file is not None:
+            clauses.append("source_file = ?")
+            params.append(source_file)
+        if alive:
+            clauses.append("removed_at IS NULL")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cur = self._db.execute(f"SELECT * FROM memory_items {where} ORDER BY created_at", params)
+        return [_row_to_item(r) for r in cur.fetchall()]
+
+    def find_similar_items(
+        self,
+        embedding: bytes,
+        top_k: int = 5,
+        threshold: float = 0.92,
+    ) -> list[tuple[str, float]]:
+        """Linear-scan cosine similarity over alive items with embeddings."""
+        query_vec = _unpack_floats(embedding)
+        cur = self._db.execute(
+            "SELECT id, embedding FROM memory_items "
+            "WHERE removed_at IS NULL AND embedding IS NOT NULL"
+        )
+        hits: list[tuple[str, float]] = []
+        for row in cur.fetchall():
+            other = _unpack_floats(row["embedding"])
+            if len(other) != len(query_vec):
+                continue
+            score = _cosine(query_vec, other)
+            if score >= threshold:
+                hits.append((row["id"], score))
+        hits.sort(key=lambda x: -x[1])
+        return hits[:top_k]
 
     def close(self) -> None:
         self._db.close()
