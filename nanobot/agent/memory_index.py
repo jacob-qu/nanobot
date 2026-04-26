@@ -391,6 +391,38 @@ class MemoryIndex:
         self._db.execute("DELETE FROM item_concepts WHERE concept_id=?", (src_id,))
         self._db.commit()
 
+    def dedup_concepts_by_name(self) -> int:
+        """Merge concepts with identical (normalized) names into the oldest.
+
+        Returns the number of concepts merged away.
+        """
+        cur = self._db.execute(
+            "SELECT id, name, created_at FROM concepts "
+            "WHERE merged_into IS NULL ORDER BY created_at"
+        )
+        groups: dict[str, list[tuple[str, int]]] = {}
+        for row in cur.fetchall():
+            key = row["name"].strip()
+            groups.setdefault(key, []).append((row["id"], row["created_at"]))
+
+        merged = 0
+        for name, rows in groups.items():
+            if len(rows) < 2:
+                continue
+            # Oldest wins (first in ORDER BY created_at)
+            keeper_id = rows[0][0]
+            for src_id, _ in rows[1:]:
+                self.merge_concept(src_id, keeper_id)
+                merged += 1
+        # Refresh member_count on survivors
+        self._db.execute(
+            "UPDATE concepts SET member_count = ("
+            "  SELECT COUNT(*) FROM item_concepts WHERE concept_id = concepts.id"
+            ") WHERE merged_into IS NULL"
+        )
+        self._db.commit()
+        return merged
+
     def find_similar_concepts(
         self, embedding: bytes, top_k: int = 5,
     ) -> list[tuple[str, float]]:

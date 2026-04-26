@@ -124,6 +124,27 @@ class TestConceptsCRUD:
         assert index.get_concept(a).merged_into == b
         assert index.get_concept(b).merged_into is None
 
+    def test_dedup_concepts_by_name_merges_same_name_into_oldest(self, index: MemoryIndex):
+        import time as _t
+        # oldest first
+        a = index.upsert_concept(self._make_concept("飞书监控群"))
+        _t_sleep = _t.sleep  # noqa
+        # force distinct created_at via raw update
+        b = index.upsert_concept(self._make_concept("飞书监控群"))
+        c = index.upsert_concept(self._make_concept("飞书监控群"))
+        # Adjust created_at so ordering is stable (a < b < c)
+        index._db.execute("UPDATE concepts SET created_at = 1000 WHERE id = ?", (a,))
+        index._db.execute("UPDATE concepts SET created_at = 2000 WHERE id = ?", (b,))
+        index._db.execute("UPDATE concepts SET created_at = 3000 WHERE id = ?", (c,))
+        index._db.commit()
+
+        merged = index.dedup_concepts_by_name()
+        assert merged == 2
+        # a survives, b and c merged into a
+        assert index.get_concept(a).merged_into is None
+        assert index.get_concept(b).merged_into == a
+        assert index.get_concept(c).merged_into == a
+
 
 class TestItemConceptLinks:
     def test_link_and_list(self, index: MemoryIndex):

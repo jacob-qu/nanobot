@@ -125,6 +125,12 @@ class ReconcileEngine:
         # 4. Relation inference (one batched LLM call)
         await self._infer_relations(chunks, item_ids)
 
+        # 4b. Dedup concepts with identical names (LLM often re-invents concepts
+        #     within a single batch; bootstrap produces the worst case).
+        merged = self._index.dedup_concepts_by_name()
+        if merged:
+            logger.info("Bootstrap: merged {} duplicate concepts by name", merged)
+
         # 5. Bootstrap mode: no impact issues
         self._index.set_meta("last_reconciled_commit", current_commit)
 
@@ -369,6 +375,9 @@ class ReconcileEngine:
         if changed_chunks:
             await self._assign_concepts(changed_chunks, changed_ids)
             await self._infer_relations(changed_chunks, changed_ids)
+            # Dedup: concept assignment may mint new concepts that duplicate
+            # existing ones with the same name.
+            self._index.dedup_concepts_by_name()
 
         # Impact review — only for non-new items (existing items that got modified)
         issues_created = 0

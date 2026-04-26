@@ -40,19 +40,29 @@ class GetMemoryConceptTool(Tool):
     async def execute(self, query: str, **kwargs: Any) -> str:
         matches = self._index.find_concept_by_name(query, fuzzy=True)
         if not matches:
-            return f'No concept found matching "{query}".'
+            return f'未找到匹配 "{query}" 的概念。'
         lines: list[str] = []
         for c in matches[:3]:
-            lines.append(f"## {c.name}")
+            lines.append(f"# 概念：{c.name}")
             if c.description:
-                lines.append(c.description)
+                lines.append(f"> {c.description}")
+            lines.append("")
             item_ids = self._index.list_items_for_concept(c.id)
-            for iid in item_ids[:20]:
-                item = self._index.get_item(iid)
-                if not item:
-                    continue
-                snippet = item.content if len(item.content) <= 200 else item.content[:200] + "..."
-                lines.append(f"- [{item.section_path}] {snippet}")
+            if not item_ids:
+                lines.append("（该概念下暂无条目）")
+            else:
+                lines.append(f"## 覆盖的记忆条目（{len(item_ids)}）")
+                for iid in item_ids[:15]:
+                    item = self._index.get_item(iid)
+                    if not item:
+                        continue
+                    snippet = item.content.replace("\n", " ⏎ ")
+                    if len(snippet) > 150:
+                        snippet = snippet[:150] + "…"
+                    lines.append(f"- [{item.section_path}]")
+                    lines.append(f"  {snippet}")
+                if len(item_ids) > 15:
+                    lines.append(f"...（另有 {len(item_ids) - 15} 条未显示）")
             lines.append("")
         return "\n".join(lines).rstrip()
 
@@ -111,66 +121,104 @@ class QueryMemoryImpactTool(Tool):
     def _format_concept_impact(
         self, concept, member_item_ids: list[str], concept_impact,
     ) -> str:
-        """Aggregate impact across all items carrying this concept."""
-        lines = [f"Impact of concept `{concept.name}` (covers {len(member_item_ids)} item(s)):"]
+        """Aggregate impact across all items carrying this concept.
 
-        # Gather all incoming edges across member items
-        seen_pairs: set[tuple[str, str]] = set()  # dedup (from_id, to_id)
-        rows: list[str] = []
+        Output groups dependents by relation_type and deduplicates by from_id
+        so the same source only shows once even if it touches multiple members.
+        """
+        lines = [
+            f"# 概念「{concept.name}」的影响面",
+            f"（覆盖 {len(member_item_ids)} 个条目）",
+            "",
+        ]
+
+        # Collect incoming edges across all members, dedup by from_id
+        by_type: dict[str, dict[str, tuple[float, str | None]]] = {}
         for item_id in member_item_ids:
-            item = self._index.get_item(item_id)
-            if not item:
-                continue
-            item_label = f"[{item.section_path}] {item.content[:50]}"
             for e in self._index.relations_to("item", item_id):
-                key = (e.from_id, e.to_id)
-                if key in seen_pairs:
-                    continue
-                seen_pairs.add(key)
-                subj = self._resolve_label(e.from_kind, e.from_id)
-                rows.append(
-                    f"- {subj} --[{e.relation_type}, {e.confidence:.2f}]--> {item_label}"
-                )
-                if e.rationale:
-                    rows.append(f"    rationale: {e.rationale}")
+                bucket = by_type.setdefault(e.relation_type, {})
+                prior = bucket.get(e.from_id)
+                # Keep the highest-confidence edge per source
+                if prior is None or e.confidence > prior[0]:
+                    bucket[e.from_id] = (e.confidence, e.rationale)
 
-        # Also include any direct concept-level relations (if the graph ever grows them)
         for e in concept_impact.incoming_edges:
-            subj = self._resolve_label(e.from_kind, e.from_id)
-            rows.append(
-                f"- {subj} --[{e.relation_type}, {e.confidence:.2f}]--> concept:{concept.name}"
-            )
-            if e.rationale:
-                rows.append(f"    rationale: {e.rationale}")
+            bucket = by_type.setdefault(e.relation_type, {})
+            prior = bucket.get(e.from_id)
+            if prior is None or e.confidence > prior[0]:
+                bucket[e.from_id] = (e.confidence, e.rationale)
 
-        if not rows:
-            lines.append("  (no dependents found)")
-        else:
-            lines.extend(rows)
-        return "\n".join(lines)
+        if not by_type:
+            lines.append("（未发现引用或依赖）")
+            return "\n".join(lines)
+
+        # Human-friendly type labels
+        type_labels = {
+            "references": "引用",
+            "depends_on": "依赖",
+            "supersedes": "取代",
+            "conflicts_with": "冲突",
+            "implements": "实现",
+            "documents": "描述",
+        }
+        # Render, relation types ordered by importance
+        order = ["depends_on", "conflicts_with", "references", "implements",
+                 "documents", "supersedes"]
+        for rtype in order:
+            if rtype not in by_type:
+                continue
+            bucket = by_type[rtype]
+            label = type_labels.get(rtype, rtype)
+            lines.append(f"## {label}（{rtype}）")
+            # Sort by confidence desc, cap at 8 entries
+            entries = sorted(bucket.items(), key=lambda kv: -kv[1][0])[:8]
+            for from_id, (conf, rationale) in entries:
+                subj = self._resolve_label("item", from_id)
+                lines.append(f"- {subj}  (conf {conf:.2f})")
+                if rationale:
+                    lines.append(f"  └ {rationale}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
 
     def _format_impact(self, kind: str, label: str, impact: "ImpactResult") -> str:
-        lines = [f"Impact of {kind} `{label}`:"]
+        lines = [f"# 条目「{label}」的影响面"]
         if not impact.incoming_edges and not impact.transitive_nodes:
-            lines.append("  (no dependents found)")
+            lines.append("")
+            lines.append("（未发现引用或依赖）")
             return "\n".join(lines)
+        type_labels = {
+            "references": "引用",
+            "depends_on": "依赖",
+            "supersedes": "取代",
+            "conflicts_with": "冲突",
+            "implements": "实现",
+            "documents": "描述",
+        }
+        by_type: dict[str, list] = {}
         for e in impact.incoming_edges:
-            subj = self._resolve_label(e.from_kind, e.from_id)
-            lines.append(
-                f"- {subj} --[{e.relation_type}, {e.confidence:.2f}]--> {label}"
-            )
-            if e.rationale:
-                lines.append(f"    rationale: {e.rationale}")
-        for (fk, fid, depth) in impact.transitive_nodes:
-            subj = self._resolve_label(fk, fid)
-            lines.append(f"  (depth {depth}) {subj}")
-        return "\n".join(lines)
+            by_type.setdefault(e.relation_type, []).append(e)
+        lines.append("")
+        for rtype, edges in by_type.items():
+            human = type_labels.get(rtype, rtype)
+            lines.append(f"## {human}（{rtype}）")
+            edges.sort(key=lambda e: -e.confidence)
+            for e in edges[:8]:
+                subj = self._resolve_label(e.from_kind, e.from_id)
+                lines.append(f"- {subj}  (conf {e.confidence:.2f})")
+                if e.rationale:
+                    lines.append(f"  └ {e.rationale}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
 
     def _resolve_label(self, kind: str, id: str) -> str:
         if kind == "item":
             it = self._index.get_item(id)
             if it:
-                return f"[{it.section_path}] {it.content[:60]}"
+                # Collapse multiline content to single-line preview
+                preview = it.content.replace("\n", " ⏎ ")
+                if len(preview) > 70:
+                    preview = preview[:70] + "…"
+                return f"[{it.section_path}] {preview}"
         elif kind == "concept":
             c = self._index.get_concept(id)
             if c:
@@ -207,8 +255,10 @@ class ListOpenIssuesTool(Tool):
     async def execute(self, severity: str = "medium", **kwargs: Any) -> str:
         issues = self._index.list_open_issues(severity_min=severity)
         if not issues:
-            return f"No open issues at severity>={severity}."
-        lines = [f"{len(issues)} open issue(s) at severity>={severity}:"]
+            return f"没有待处理的一致性告警（severity ≥ {severity}）。"
+        lines = [f"# 未处理的记忆一致性告警（{len(issues)} 条，severity ≥ {severity}）", ""]
         for i in issues:
-            lines.append(f"- [{i.severity}] {i.issue_type}: {i.description}")
-        return "\n".join(lines)
+            lines.append(f"## [{i.severity}] {i.issue_type}")
+            lines.append(i.description)
+            lines.append("")
+        return "\n".join(lines).rstrip()
