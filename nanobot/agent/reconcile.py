@@ -404,14 +404,38 @@ class ReconcileEngine:
         """Compute impact candidates, LLM-review, emit issues. Returns count."""
         impact = self._index.query_impact("item", item_id, depth=2)
         candidates: list[dict[str, Any]] = []
-        # Direct incoming edges
+        seen_cand: set[str] = {item_id}  # don't list the changed item as its own dependent
+
+        # Direct incoming edges (items that explicitly reference the changed one)
         for e in impact.incoming_edges:
-            it = self._index.get_item(e.from_id) if e.from_kind == "item" else None
-            if it:
+            if e.from_kind != "item" or e.from_id in seen_cand:
+                continue
+            it = self._index.get_item(e.from_id)
+            if not it:
+                continue
+            seen_cand.add(e.from_id)
+            candidates.append({
+                "id": it.id, "section": it.section_path,
+                "content": it.content[:300],
+                "source": "relation",
+            })
+
+        # Concept siblings (items sharing any concept with the changed item)
+        concept_ids = self._index.list_concepts_for_item(item_id)
+        for c_id in concept_ids:
+            for sib_id in self._index.list_items_for_concept(c_id):
+                if sib_id in seen_cand:
+                    continue
+                sib = self._index.get_item(sib_id)
+                if not sib or sib.removed_at is not None:
+                    continue
+                seen_cand.add(sib_id)
                 candidates.append({
-                    "id": it.id, "section": it.section_path,
-                    "content": it.content[:300],
+                    "id": sib.id, "section": sib.section_path,
+                    "content": sib.content[:300],
+                    "source": "concept_sibling",
                 })
+
         if not candidates:
             return 0
 
@@ -435,7 +459,7 @@ class ReconcileEngine:
             if not v.get("relevant"):
                 continue
             cand_id = v.get("candidate_id")
-            if not cand_id:
+            if not cand_id or cand_id not in seen_cand:
                 continue
             self._index.add_issue(ConsistencyIssue(
                 id="", trigger_event="dream_scan", trigger_ref=trigger_ref,
