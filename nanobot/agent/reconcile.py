@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import struct
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -47,6 +48,21 @@ def _parse_json_array(text: str) -> list[dict]:
     except json.JSONDecodeError as e:
         logger.warning(f"reconcile: JSON parse failed: {e}; text head: {text[:200]}")
         return []
+
+
+@dataclass
+class RunResult:
+    total_changes: int
+    added_count: int
+    removed_count: int
+    modified_count: int
+    issues_created: int
+
+
+def _chunks_equal(a: list[Chunk], b: list[Chunk]) -> bool:
+    if len(a) != len(b):
+        return False
+    return all(x.content_hash == y.content_hash for x, y in zip(a, b))
 
 
 class ReconcileEngine:
@@ -223,3 +239,197 @@ class ReconcileEngine:
                 created_at=now, invalidated_at=None,
             )
             self._index.add_relation(rel)
+
+    # -- incremental run --------------------------------------------------
+
+    async def run(
+        self, previous_content: str, trigger_ref: str | None = None,
+    ) -> RunResult:
+        """Diff previous_content vs current MEMORY.md, update index, emit issues."""
+        current_content = (
+            self._memory_file.read_text(encoding="utf-8")
+            if self._memory_file.exists() else ""
+        )
+
+        old_chunks = chunk_markdown(previous_content)
+        new_chunks = chunk_markdown(current_content)
+
+        if _chunks_equal(old_chunks, new_chunks):
+            return RunResult(0, 0, 0, 0, 0)
+
+        # Embed only new chunks (old ones have embeddings in the index already)
+        new_vecs = await self._embedding.embed_batch([c.content for c in new_chunks])
+        new_embeddings_by_hash = {
+            c.content_hash: _pack(v) for c, v in zip(new_chunks, new_vecs)
+        }
+
+        # Retrieve old-item embeddings from index by content_hash lookup
+        old_embeddings_by_hash: dict[str, bytes] = {}
+        for oc in old_chunks:
+            existing = self._find_item_by_hash(oc.content_hash)
+            if existing and existing.embedding:
+                old_embeddings_by_hash[oc.content_hash] = existing.embedding
+
+        diff = align_items(
+            old=old_chunks, new=new_chunks,
+            old_embeddings=old_embeddings_by_hash,
+            new_embeddings=new_embeddings_by_hash,
+            threshold=self._threshold,
+        )
+
+        now = int(time.time())
+        new_item_ids: list[str] = []
+        changed_chunks: list[Chunk] = []
+        changed_ids: list[str] = []
+
+        # Handle added
+        for ch in diff.added:
+            vec = new_embeddings_by_hash.get(ch.content_hash)
+            item = ItemRecord(
+                id="", source_file=self._source_file, section_path=ch.section_path,
+                item_type=ch.item_type, content=ch.content,
+                content_hash=ch.content_hash, embedding=vec,
+                created_at=now, updated_at=now, removed_at=None,
+            )
+            nid = self._index.upsert_item(item)
+            new_item_ids.append(nid)
+            changed_chunks.append(ch)
+            changed_ids.append(nid)
+
+        # Handle removed (tombstone)
+        for ch in diff.removed:
+            existing = self._find_item_by_hash(ch.content_hash)
+            if existing:
+                self._index.tombstone_item(existing.id)
+
+        # Handle modified (update existing item in place)
+        for pair in diff.modified:
+            existing = self._find_item_by_hash(pair.old.content_hash)
+            if not existing:
+                continue
+            vec = new_embeddings_by_hash.get(pair.new.content_hash)
+            existing.content = pair.new.content
+            existing.content_hash = pair.new.content_hash
+            existing.item_type = pair.new.item_type
+            existing.section_path = pair.new.section_path
+            existing.embedding = vec
+            existing.updated_at = now
+            self._index.upsert_item(existing)
+            changed_chunks.append(pair.new)
+            changed_ids.append(existing.id)
+
+        # Ambiguous → write id_remap_ambiguous issue, tombstone olds, insert news
+        for grp in diff.ambiguous:
+            for ch in grp.olds:
+                ex = self._find_item_by_hash(ch.content_hash)
+                if ex:
+                    self._index.tombstone_item(ex.id)
+            for ch in grp.news:
+                vec = new_embeddings_by_hash.get(ch.content_hash)
+                item = ItemRecord(
+                    id="", source_file=self._source_file, section_path=ch.section_path,
+                    item_type=ch.item_type, content=ch.content,
+                    content_hash=ch.content_hash, embedding=vec,
+                    created_at=now, updated_at=now, removed_at=None,
+                )
+                nid = self._index.upsert_item(item)
+                new_item_ids.append(nid)
+                changed_chunks.append(ch)
+                changed_ids.append(nid)
+            self._index.add_issue(ConsistencyIssue(
+                id="", trigger_event="dream_scan", trigger_ref=trigger_ref,
+                issue_type="id_remap_ambiguous",
+                subject_ids=json.dumps(
+                    [{"kind": "item", "hash": c.content_hash} for c in grp.olds + grp.news],
+                    ensure_ascii=False),
+                description=f"ID 对齐歧义 ({grp.kind}): {len(grp.olds)} 老条目 vs {len(grp.news)} 新条目",
+                severity="medium", status="open", resolution=None,
+                created_at=now, resolved_at=None,
+            ))
+
+        # LLM concept + relation on changed set
+        if changed_chunks:
+            await self._assign_concepts(changed_chunks, changed_ids)
+            await self._infer_relations(changed_chunks, changed_ids)
+
+        # Impact review — only for non-new items (existing items that got modified)
+        issues_created = 0
+        new_item_id_set = set(new_item_ids)
+        for item_id in changed_ids:
+            if item_id in new_item_id_set:
+                continue  # new items have no prior impact graph
+            issues_created += await self._review_impact(item_id, trigger_ref, now)
+
+        return RunResult(
+            total_changes=len(diff.added) + len(diff.removed) + len(diff.modified),
+            added_count=len(diff.added),
+            removed_count=len(diff.removed),
+            modified_count=len(diff.modified),
+            issues_created=issues_created,
+        )
+
+    def _find_item_by_hash(self, content_hash: str) -> ItemRecord | None:
+        cur = self._index._db.execute(
+            "SELECT * FROM memory_items WHERE content_hash=? AND removed_at IS NULL "
+            "ORDER BY created_at LIMIT 1",
+            (content_hash,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        from nanobot.agent.memory_index import _row_to_item
+        return _row_to_item(row)
+
+    async def _review_impact(
+        self, item_id: str, trigger_ref: str | None, now: int,
+    ) -> int:
+        """Compute impact candidates, LLM-review, emit issues. Returns count."""
+        impact = self._index.query_impact("item", item_id, depth=2)
+        candidates: list[dict[str, Any]] = []
+        # Direct incoming edges
+        for e in impact.incoming_edges:
+            it = self._index.get_item(e.from_id) if e.from_kind == "item" else None
+            if it:
+                candidates.append({
+                    "id": it.id, "section": it.section_path,
+                    "content": it.content[:300],
+                })
+        if not candidates:
+            return 0
+
+        changed = self._index.get_item(item_id)
+        if not changed:
+            return 0
+
+        prompt = render_template(
+            "agent/reconcile_impact.md",
+            changed_item=json.dumps({
+                "id": changed.id, "section": changed.section_path,
+                "content": changed.content,
+            }, ensure_ascii=False),
+            candidates=json.dumps(candidates, ensure_ascii=False),
+        )
+        raw = await self._llm.complete(prompt)
+        verdicts = _parse_json_array(raw)
+
+        count = 0
+        for v in verdicts:
+            if not v.get("relevant"):
+                continue
+            cand_id = v.get("candidate_id")
+            if not cand_id:
+                continue
+            self._index.add_issue(ConsistencyIssue(
+                id="", trigger_event="dream_scan", trigger_ref=trigger_ref,
+                issue_type="impact_unreviewed",
+                subject_ids=json.dumps(
+                    [{"kind": "item", "id": item_id},
+                     {"kind": "item", "id": cand_id}],
+                    ensure_ascii=False),
+                description=v.get("action_hint", "受影响条目需复核"),
+                severity=v.get("severity", "medium"),
+                status="open", resolution=None,
+                created_at=now, resolved_at=None,
+            ))
+            count += 1
+        return count
