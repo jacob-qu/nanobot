@@ -1326,6 +1326,11 @@ class Dream:
         last_cursor = self.store.get_last_dream_cursor()
         entries = self.store.read_unprocessed_history(since_cursor=last_cursor)
         if not entries:
+            # Phase 1/2 skipped, but still run Phase 3 (reconcile) if enabled —
+            # MEMORY.md may have been externally modified (vim edit, agent's
+            # edit_file tool, etc.) even with no new history.
+            if self.reconcile_engine is not None:
+                await self._run_reconcile_only()
             return False
 
         batch = entries[: self.max_batch_size]
@@ -1488,9 +1493,7 @@ class Dream:
             try:
                 self.reconcile_engine.set_last_reconciled_commit(sha)
             except Exception:
-                logger.warning("Dream: update last_reconciled_commit failed (non-fatal)")
-
-        # Notify (e.g. Feishu) after commit
+                logger.warning("Dream: update last_reconciled_commit failed (non-fatal)")        # Notify (e.g. Feishu) after commit
         if changelog and self.notify:
             lines = "\n".join(f"- {c}" for c in changelog)
             restore_hint = f"\n\n如需还原：/dream-restore {sha}" if sha else ""
@@ -1512,3 +1515,77 @@ class Dream:
             logger.exception("Backfill in Dream cycle failed (non-fatal)")
 
         return True
+
+    async def _run_reconcile_only(self) -> None:
+        """Run Phase 3 (reconcile) alone when there's no history work.
+
+        Handles the case where MEMORY.md was edited externally (vim, or agent's
+        edit_file tool) but no new history entries accumulated. Commits any
+        dirty MEMORY.md first so the reconcile diff has a stable baseline,
+        then calls ReconcileEngine.run() and updates the watermark.
+        """
+        engine = self.reconcile_engine
+        if engine is None:
+            return
+        if not self.store.git.is_initialized():
+            logger.debug("Reconcile-only: git not initialized, skipping")
+            return
+
+        # Current on-disk content
+        current_content = self.store.read_memory() or ""
+        # Baseline at HEAD before any new commit
+        head_content = self.store.git.read_file_at("HEAD", "memory/MEMORY.md") or ""
+        dirty = current_content != head_content
+
+        # If dirty, commit the external edit so reconcile has a stable baseline
+        sha: str | None = None
+        if dirty:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            commit_msg = f"external: {ts}, MEMORY.md modified outside Dream"
+            sha = self.store.git.auto_commit(commit_msg)
+            if sha:
+                logger.info("Reconcile-only: committed external MEMORY.md change: {}", sha)
+
+        # Compute reconcile baseline
+        last_sha = engine.index_last_reconciled_commit()
+        if last_sha:
+            previous_content = self.store.git.read_file_at(last_sha, "memory/MEMORY.md") or ""
+        else:
+            previous_content = head_content
+
+        # If nothing actually changed since last reconcile, short-circuit
+        if previous_content == current_content:
+            logger.debug("Reconcile-only: no net change since last_reconciled_commit, skip")
+            return
+
+        try:
+            run_result = await engine.run(
+                previous_content=previous_content,
+                trigger_ref=sha,
+            )
+            logger.info(
+                "Reconcile-only: changes={} added={} removed={} modified={} issues={}",
+                run_result.total_changes, run_result.added_count,
+                run_result.removed_count, run_result.modified_count,
+                run_result.issues_created,
+            )
+            # Update watermark to whatever HEAD is now
+            new_head = self.store.git.current_commit()
+            if new_head:
+                engine.set_last_reconciled_commit(new_head)
+
+            # Notify user of reconcile outcome, so trigger_dream is visible
+            if self.notify and (run_result.total_changes or run_result.issues_created):
+                parts = [
+                    f"Dream reconcile 完成：{run_result.total_changes} 条变更"
+                    f"（+{run_result.added_count}/-{run_result.removed_count}"
+                    f"/~{run_result.modified_count}），产出 {run_result.issues_created} 条一致性告警。"
+                ]
+                if run_result.issues_created:
+                    parts.append("用 list_open_issues 查看详情。")
+                try:
+                    await self.notify("\n".join(parts))
+                except Exception:
+                    logger.exception("Reconcile-only notification failed")
+        except Exception:
+            logger.exception("Reconcile-only failed (non-fatal)")
