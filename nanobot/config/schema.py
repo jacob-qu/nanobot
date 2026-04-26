@@ -85,6 +85,20 @@ class EmbeddingConfig(Base):
     provider: str = "auto"  # 取哪个 provider 的 key/base；auto = 按 model 匹配
 
 
+class MemoryIndexConfig(Base):
+    """MEMORY.md 结构化索引配置。"""
+
+    enabled: bool = False  # 默认关闭；开启后 Dream 会跑 Phase 3 reconcile
+    db_filename: str = "index.db"  # workspace/memory/ 下的文件名
+    similarity_threshold: float = Field(default=0.92, ge=0.0, le=1.0)  # item 对齐阈值
+    concept_merge_threshold: float = Field(default=0.95, ge=0.0, le=1.0)  # 概念去重阈值
+    embedding_batch_size: int = Field(default=32, ge=1)
+    llm_model: str | None = None  # None = 沿用 Dream 的 model_override
+    concept_top_k_candidates: int = Field(default=5, ge=1)  # 概念分配时提供给 LLM 的候选数
+    relation_top_k_neighbors: int = Field(default=5, ge=1)  # 关联推断时 embedding KNN 邻居数
+    impact_depth: int = Field(default=2, ge=1, le=3)  # query_impact 传递跳数
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -112,6 +126,7 @@ class AgentDefaults(Base):
     )  # Auto-compact idle threshold in minutes (0 = disabled)
     dream: DreamConfig = Field(default_factory=DreamConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    memory_index: MemoryIndexConfig = Field(default_factory=MemoryIndexConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
 
 
