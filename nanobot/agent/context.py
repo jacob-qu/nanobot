@@ -27,11 +27,13 @@ class ContextBuilder:
         timezone: str | None = None,
         disabled_skills: list[str] | None = None,
         embedding_dimensions: int | None = None,
+        memory_index_enabled: bool = False,
     ):
         self.workspace = workspace
         self.timezone = timezone
         self.memory = MemoryStore(workspace, embedding_dimensions=embedding_dimensions)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
+        self._memory_index_enabled = memory_index_enabled
 
     def build_system_prompt(
         self,
@@ -65,6 +67,13 @@ class ContextBuilder:
             parts.append("# Recent History\n\n" + "\n".join(
                 f"- [{e['timestamp']}] {e['content']}" for e in capped
             ))
+
+        if self._memory_index_enabled:
+            parts.append(
+                "# Memory Tools\n\n"
+                "如需追溯记忆的影响范围、查看概念定义或未处理的一致性问题，"
+                "使用 `query_memory_impact` / `get_memory_concept` / `list_open_issues` 工具。"
+            )
 
         return "\n\n---\n\n".join(parts)
 

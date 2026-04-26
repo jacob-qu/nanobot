@@ -213,6 +213,7 @@ class AgentLoop:
             timezone=timezone,
             disabled_skills=disabled_skills,
             embedding_dimensions=embedding_dims,
+            memory_index_enabled=bool(memory_index_config and memory_index_config.enabled),
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
