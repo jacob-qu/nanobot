@@ -87,3 +87,59 @@ class TestItemsCRUD:
         assert len(results) == 2
         # highest first
         assert results[0][1] >= results[1][1]
+
+
+from nanobot.agent.memory_index import Concept
+
+
+class TestConceptsCRUD:
+    def _make_concept(self, name: str = "三档待办判断") -> Concept:
+        now = int(time.time())
+        return Concept(
+            id="",
+            name=name,
+            description=f"desc of {name}",
+            centroid_embed=None,
+            member_count=0,
+            created_at=now,
+            updated_at=now,
+            merged_into=None,
+        )
+
+    def test_upsert_concept_assigns_id(self, index: MemoryIndex):
+        c_id = index.upsert_concept(self._make_concept())
+        assert c_id and index.get_concept(c_id).name == "三档待办判断"
+
+    def test_find_concept_by_name_fuzzy(self, index: MemoryIndex):
+        index.upsert_concept(self._make_concept("三档待办判断"))
+        index.upsert_concept(self._make_concept("单聊覆盖"))
+        results = index.find_concept_by_name("三档", fuzzy=True)
+        assert len(results) == 1
+        assert results[0].name == "三档待办判断"
+
+    def test_merge_concept_sets_merged_into(self, index: MemoryIndex):
+        a = index.upsert_concept(self._make_concept("A"))
+        b = index.upsert_concept(self._make_concept("B"))
+        index.merge_concept(a, b)
+        assert index.get_concept(a).merged_into == b
+        assert index.get_concept(b).merged_into is None
+
+
+class TestItemConceptLinks:
+    def test_link_and_list(self, index: MemoryIndex):
+        import time as _t
+        item = ItemRecord(
+            id="", source_file="memory/MEMORY.md", section_path="r",
+            item_type="list_item", content="x", content_hash="h",
+            embedding=None, created_at=int(_t.time()), updated_at=int(_t.time()),
+            removed_at=None,
+        )
+        item_id = index.upsert_item(item)
+        c_id = index.upsert_concept(Concept(
+            id="", name="C", description=None, centroid_embed=None,
+            member_count=0, created_at=int(_t.time()), updated_at=int(_t.time()),
+            merged_into=None,
+        ))
+        index.link_item_concept(item_id, c_id, confidence=0.9, source="llm")
+        assert index.list_concepts_for_item(item_id) == [c_id]
+        assert index.list_items_for_concept(c_id) == [item_id]

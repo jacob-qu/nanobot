@@ -44,6 +44,27 @@ def _row_to_item(row: sqlite3.Row) -> ItemRecord:
     )
 
 
+@dataclass
+class Concept:
+    id: str
+    name: str
+    description: str | None
+    centroid_embed: bytes | None
+    member_count: int
+    created_at: int
+    updated_at: int
+    merged_into: str | None
+
+
+def _row_to_concept(row: sqlite3.Row) -> Concept:
+    return Concept(
+        id=row["id"], name=row["name"], description=row["description"],
+        centroid_embed=row["centroid_embed"], member_count=row["member_count"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+        merged_into=row["merged_into"],
+    )
+
+
 def _unpack_floats(blob: bytes) -> list[float]:
     n = len(blob) // 4
     return list(struct.unpack(f"{n}f", blob))
@@ -253,6 +274,111 @@ class MemoryIndex:
                 hits.append((row["id"], score))
         hits.sort(key=lambda x: -x[1])
         return hits[:top_k]
+
+    # ---- concepts ----
+    def upsert_concept(self, c: Concept) -> str:
+        if not c.id:
+            c.id = _new_id()
+            self._db.execute(
+                "INSERT INTO concepts (id, name, description, centroid_embed, "
+                "member_count, created_at, updated_at, merged_into) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (c.id, c.name, c.description, c.centroid_embed, c.member_count,
+                 c.created_at, c.updated_at, c.merged_into),
+            )
+        else:
+            self._db.execute(
+                "UPDATE concepts SET name=?, description=?, centroid_embed=?, "
+                "member_count=?, updated_at=?, merged_into=? WHERE id=?",
+                (c.name, c.description, c.centroid_embed, c.member_count,
+                 c.updated_at, c.merged_into, c.id),
+            )
+        self._db.commit()
+        return c.id
+
+    def get_concept(self, concept_id: str) -> Concept | None:
+        cur = self._db.execute("SELECT * FROM concepts WHERE id=?", (concept_id,))
+        row = cur.fetchone()
+        return _row_to_concept(row) if row else None
+
+    def find_concept_by_name(self, name: str, fuzzy: bool = True) -> list[Concept]:
+        if fuzzy:
+            pattern = f"%{name}%"
+            cur = self._db.execute(
+                "SELECT * FROM concepts WHERE merged_into IS NULL AND name LIKE ? "
+                "ORDER BY created_at",
+                (pattern,),
+            )
+        else:
+            cur = self._db.execute(
+                "SELECT * FROM concepts WHERE merged_into IS NULL AND name=? "
+                "ORDER BY created_at",
+                (name,),
+            )
+        return [_row_to_concept(r) for r in cur.fetchall()]
+
+    def merge_concept(self, src_id: str, dst_id: str) -> None:
+        now = int(time.time())
+        self._db.execute(
+            "UPDATE concepts SET merged_into=?, updated_at=? WHERE id=?",
+            (dst_id, now, src_id),
+        )
+        # repoint item_concepts
+        self._db.execute(
+            "UPDATE OR IGNORE item_concepts SET concept_id=? WHERE concept_id=?",
+            (dst_id, src_id),
+        )
+        self._db.execute("DELETE FROM item_concepts WHERE concept_id=?", (src_id,))
+        self._db.commit()
+
+    def find_similar_concepts(
+        self, embedding: bytes, top_k: int = 5,
+    ) -> list[tuple[str, float]]:
+        qv = _unpack_floats(embedding)
+        cur = self._db.execute(
+            "SELECT id, centroid_embed FROM concepts "
+            "WHERE merged_into IS NULL AND centroid_embed IS NOT NULL"
+        )
+        hits: list[tuple[str, float]] = []
+        for r in cur.fetchall():
+            other = _unpack_floats(r["centroid_embed"])
+            if len(other) != len(qv):
+                continue
+            hits.append((r["id"], _cosine(qv, other)))
+        hits.sort(key=lambda x: -x[1])
+        return hits[:top_k]
+
+    # ---- item_concepts ----
+    def link_item_concept(
+        self, item_id: str, concept_id: str, confidence: float, source: str,
+    ) -> None:
+        now = int(time.time())
+        self._db.execute(
+            "INSERT OR REPLACE INTO item_concepts "
+            "(item_id, concept_id, confidence, source, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (item_id, concept_id, confidence, source, now),
+        )
+        self._db.commit()
+
+    def unlink_item_concept(self, item_id: str, concept_id: str) -> None:
+        self._db.execute(
+            "DELETE FROM item_concepts WHERE item_id=? AND concept_id=?",
+            (item_id, concept_id),
+        )
+        self._db.commit()
+
+    def list_concepts_for_item(self, item_id: str) -> list[str]:
+        cur = self._db.execute(
+            "SELECT concept_id FROM item_concepts WHERE item_id=?", (item_id,),
+        )
+        return [r["concept_id"] for r in cur.fetchall()]
+
+    def list_items_for_concept(self, concept_id: str) -> list[str]:
+        cur = self._db.execute(
+            "SELECT item_id FROM item_concepts WHERE concept_id=?", (concept_id,),
+        )
+        return [r["item_id"] for r in cur.fetchall()]
 
     def close(self) -> None:
         self._db.close()
