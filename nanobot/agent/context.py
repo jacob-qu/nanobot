@@ -71,8 +71,17 @@ class ContextBuilder:
         if self._memory_index_enabled:
             parts.append(
                 "# Memory Tools\n\n"
-                "如需追溯记忆的影响范围、查看概念定义或未处理的一致性问题，"
-                "使用 `query_memory_impact` / `get_memory_concept` / `list_open_issues` 工具。"
+                "记忆索引（MemoryIndex）在线。处理记忆相关请求时**优先使用以下工具**，不要依赖上面 "
+                "`Long-term Memory` 里的 MEMORY.md 原文自行回答，也不要 spawn subagent 去手工扫描/"
+                "diff 文件——那会绕过结构化索引，产出不可靠。\n\n"
+                "- `get_memory_concept(query)`：查询某个概念的结构化定义与成员条目\n"
+                "- `query_memory_impact(target)`：**修改任何记忆前必调**，反向追溯受影响的条目\n"
+                "- `trigger_dream(reason)`：触发一轮真正的 Dream（记忆整理 + reconcile）。"
+                "用户说 `/dream`、'reconcile 一下'、'跑一次 dream'、"
+                "'做一次一致性检查' 时都走此工具——**不要 spawn subagent 自己模拟**\n"
+                "- `list_open_issues(severity)`：查看 Dream reconcile 产生的未处理一致性告警\n\n"
+                "典型链路：用户改记忆 → 先 `query_memory_impact` → 用 `edit_file` 落盘 → "
+                "`trigger_dream` → 稍后 `list_open_issues` 回看本轮告警。"
             )
 
         return "\n\n---\n\n".join(parts)

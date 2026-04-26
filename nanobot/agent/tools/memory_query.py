@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
+
+from loguru import logger
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
 
 if TYPE_CHECKING:
+    from nanobot.agent.memory import Dream
     from nanobot.agent.memory_index import ImpactResult, MemoryIndex
 
 
@@ -28,9 +32,10 @@ class GetMemoryConceptTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Look up a memory concept by name (fuzzy). Returns the concept's "
-            "description and all member memory items with their section path. "
-            "Use when the user asks about a named concept or policy in memory."
+            "查询某个记忆概念的**结构化**定义——返回概念的简介、覆盖的所有条目及其所在章节。"
+            "相比在 MEMORY.md 原文里翻查，此工具返回的是去重后的概念视图，含成员条目清单，"
+            "更权威、更完整。**当用户询问某个记忆术语、概念、规则的含义时，必须优先调用此工具**，"
+            "不要依赖 system prompt 里的 MEMORY.md 原文自行回答。"
         )
 
     @property
@@ -87,9 +92,9 @@ class QueryMemoryImpactTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Given a memory item content fragment or concept name, list all "
-            "other items/concepts that reference or depend on it. Use before "
-            "modifying a memory to understand what downstream items may be affected."
+            "反向追溯：给定一个记忆条目片段或概念名，列出所有**引用/依赖/描述**它的其它条目，"
+            "按关系类型分组返回（references/depends_on/implements/documents 等）。"
+            "**修改任何记忆前必须先调此工具**，评估改动会牵动哪些下游条目、cron 任务或其他记忆。"
         )
 
     @property
@@ -244,8 +249,9 @@ class ListOpenIssuesTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "List open memory-consistency issues (awaiting user confirmation / "
-            "auto-fix). Use when the user asks about pending memory issues."
+            "列出待人工处理的记忆一致性告警（由 Dream reconcile 产生）。"
+            "告警描述会指出哪些条目被改动、可能影响哪些相关条目、建议如何同步更新。"
+            "**当用户询问『记忆里有什么问题』『有没有待处理的告警』，或刚触发完 Dream 之后，调用此工具**。"
         )
 
     @property
@@ -262,3 +268,49 @@ class ListOpenIssuesTool(Tool):
             lines.append(i.description)
             lines.append("")
         return "\n".join(lines).rstrip()
+
+
+@tool_parameters(tool_parameters_schema(
+    reason=StringSchema(
+        "触发本次 Dream 的原因，一句话（例如 '刚修改了三档待办判断逻辑，需要 reconcile'）"
+    ),
+))
+class TriggerDreamTool(Tool):
+    """Trigger a Dream run (memory consolidation + reconcile) in the background."""
+
+    def __init__(self, dream: "Dream"):
+        self._dream = dream
+
+    @property
+    def name(self) -> str:
+        return "trigger_dream"
+
+    @property
+    def description(self) -> str:
+        return (
+            "在后台启动一轮 Dream（记忆整理 + 一致性 reconcile）。"
+            "**当你刚刚修改了 MEMORY.md 或用户要求 'reconcile'/'整理记忆'/'跑一次 dream' 时，"
+            "必须调用此工具**，不要 spawn subagent 自己模拟 reconcile。"
+            "此工具会真正调用 Dream Phase 3 的 ReconcileEngine，产出的一致性告警会写入 "
+            "consistency_issues 表，用户随后可通过 `list_open_issues` 查询。"
+            "工具立即返回，Dream 结果会通过 notify 通道（飞书等）异步推送。"
+        )
+
+    @property
+    def read_only(self) -> bool:
+        # Not read-only — mutates MEMORY.md via Phase 2 and index via Phase 3.
+        return False
+
+    async def execute(self, reason: str = "", **kwargs: Any) -> str:
+        async def _run():
+            try:
+                await self._dream.run()
+            except Exception:
+                logger.exception("Dream (via trigger_dream tool) failed")
+
+        asyncio.create_task(_run())
+        tail = f"（原因：{reason}）" if reason else ""
+        return (
+            f"Dream 已在后台启动{tail}。完成后 reconcile 报告会通过飞书推送；"
+            "如需查看本轮产出的一致性告警，稍后用 list_open_issues。"
+        )

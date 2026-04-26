@@ -93,3 +93,42 @@ class TestListOpenIssuesTool:
         assert "low one" in r_all and "high one" in r_all
         r_high = await tool.execute(severity="high")
         assert "high one" in r_high and "low one" not in r_high
+
+
+class TestTriggerDreamTool:
+    @pytest.mark.asyncio
+    async def test_execute_calls_dream_run_in_background(self):
+        import asyncio as _asyncio
+
+        from nanobot.agent.tools.memory_query import TriggerDreamTool
+
+        calls: list[int] = []
+
+        class _FakeDream:
+            async def run(self):
+                calls.append(1)
+
+        tool = TriggerDreamTool(_FakeDream())
+        result = await tool.execute(reason="test")
+        # Should return immediately (fire-and-forget)
+        assert "Dream 已在后台启动" in result
+        assert "test" in result
+        # Give the background task one event loop tick to run
+        await _asyncio.sleep(0.05)
+        assert calls == [1]
+
+    @pytest.mark.asyncio
+    async def test_execute_swallows_dream_exceptions(self):
+        import asyncio as _asyncio
+
+        from nanobot.agent.tools.memory_query import TriggerDreamTool
+
+        class _BadDream:
+            async def run(self):
+                raise RuntimeError("boom")
+
+        tool = TriggerDreamTool(_BadDream())
+        # Should not raise even though dream will raise
+        result = await tool.execute()
+        assert "Dream 已在后台启动" in result
+        await _asyncio.sleep(0.05)
