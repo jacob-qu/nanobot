@@ -12,23 +12,36 @@
 - `documents`：A 是 B 的说明文字
 
 ## 输入
-### 候选条目
+### 候选条目（新/变更条目，带 index）
 {{ candidates }}
 
-### 同概念下的其它已有条目（可作为 target）
+### 已有兄弟条目（带真实 id，可作为 target）
 {{ siblings }}
 
 ## 输出格式
+目标（to）可以是：
+- **批内其它候选**：用 `"to_index": N`（N 是候选的 index，且 ≠ from_index）
+- **兄弟条目**：用 `"to_id": "<siblings 列表里出现过的真实 id>"`
+
 ```json
 [
   {
     "from_index": 0,
-    "to_id": "m_xxx",
+    "to_index": 2,
     "relation_type": "references",
     "confidence": 0.8,
-    "rationale": "A 的 instruction 提到 B 的'三档判断'"
+    "rationale": "A 引用 B 的规则"
+  },
+  {
+    "from_index": 1,
+    "to_id": "abc123deadbeef",
+    "relation_type": "depends_on",
+    "confidence": 0.7,
+    "rationale": "实现依赖兄弟条目中的配置"
   }
 ]
 ```
+
+**严格要求**：`to_id` 必须是 siblings 列表里出现过的真实 id；如果找不到合适的 target，不要凭空编号（例如 "1"、"m_xxx"），宁可不输出这条关联。
 
 没有关联时返回 `[]`。只输出 JSON 数组。

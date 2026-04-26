@@ -87,11 +87,14 @@ class QueryMemoryImpactTool(Tool):
         return True
 
     async def execute(self, target: str, **kwargs: Any) -> str:
-        # Try concept match first
+        # Try concept match first; if found, union impact across all member items
         concepts = self._index.find_concept_by_name(target, fuzzy=True)
         if concepts:
-            impact = self._index.query_impact("concept", concepts[0].id, depth=2)
-            return self._format_impact("concept", concepts[0].name, impact)
+            concept = concepts[0]
+            member_item_ids = self._index.list_items_for_concept(concept.id)
+            # Also union in direct concept-level relations (rare, but support them)
+            concept_impact = self._index.query_impact("concept", concept.id, depth=2)
+            return self._format_concept_impact(concept, member_item_ids, concept_impact)
 
         # Fall back to item content fuzzy search (simple LIKE)
         cur = self._index._db.execute(
@@ -104,6 +107,47 @@ class QueryMemoryImpactTool(Tool):
         impact = self._index.query_impact("item", row["id"], depth=2)
         item = self._index.get_item(row["id"])
         return self._format_impact("item", item.content[:60] if item else target, impact)
+
+    def _format_concept_impact(
+        self, concept, member_item_ids: list[str], concept_impact,
+    ) -> str:
+        """Aggregate impact across all items carrying this concept."""
+        lines = [f"Impact of concept `{concept.name}` (covers {len(member_item_ids)} item(s)):"]
+
+        # Gather all incoming edges across member items
+        seen_pairs: set[tuple[str, str]] = set()  # dedup (from_id, to_id)
+        rows: list[str] = []
+        for item_id in member_item_ids:
+            item = self._index.get_item(item_id)
+            if not item:
+                continue
+            item_label = f"[{item.section_path}] {item.content[:50]}"
+            for e in self._index.relations_to("item", item_id):
+                key = (e.from_id, e.to_id)
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                subj = self._resolve_label(e.from_kind, e.from_id)
+                rows.append(
+                    f"- {subj} --[{e.relation_type}, {e.confidence:.2f}]--> {item_label}"
+                )
+                if e.rationale:
+                    rows.append(f"    rationale: {e.rationale}")
+
+        # Also include any direct concept-level relations (if the graph ever grows them)
+        for e in concept_impact.incoming_edges:
+            subj = self._resolve_label(e.from_kind, e.from_id)
+            rows.append(
+                f"- {subj} --[{e.relation_type}, {e.confidence:.2f}]--> concept:{concept.name}"
+            )
+            if e.rationale:
+                rows.append(f"    rationale: {e.rationale}")
+
+        if not rows:
+            lines.append("  (no dependents found)")
+        else:
+            lines.extend(rows)
+        return "\n".join(lines)
 
     def _format_impact(self, kind: str, label: str, impact: "ImpactResult") -> str:
         lines = [f"Impact of {kind} `{label}`:"]

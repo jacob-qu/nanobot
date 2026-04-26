@@ -224,11 +224,29 @@ class ReconcileEngine:
         edges = _parse_json_array(raw)
 
         now = int(time.time())
+        valid_sibling_ids = {s["id"] for s in sibling_set}
         for e in edges:
             fi = e.get("from_index")
-            to_id = e.get("to_id")
-            if not isinstance(fi, int) or not to_id or fi >= len(item_ids):
+            if not isinstance(fi, int) or fi >= len(item_ids):
                 continue
+
+            # to target: either to_index (within batch) or to_id (sibling)
+            to_id: str | None = None
+            ti = e.get("to_index")
+            if isinstance(ti, int) and 0 <= ti < len(item_ids) and ti != fi:
+                to_id = item_ids[ti]
+            else:
+                raw_to = e.get("to_id")
+                if isinstance(raw_to, str) and raw_to in valid_sibling_ids:
+                    to_id = raw_to
+
+            if not to_id:
+                logger.debug(
+                    f"reconcile: dropping relation with invalid target "
+                    f"(to_index={ti!r} to_id={e.get('to_id')!r})"
+                )
+                continue
+
             rel = Relation(
                 id="",
                 from_kind="item", from_id=item_ids[fi],
