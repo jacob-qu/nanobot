@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.agent.memory_index import ItemRecord, MemoryIndex
+from nanobot.agent.memory_index import ConsistencyIssue, ItemRecord, MemoryIndex, Relation
 
 
 @pytest.fixture
@@ -143,3 +143,66 @@ class TestItemConceptLinks:
         index.link_item_concept(item_id, c_id, confidence=0.9, source="llm")
         assert index.list_concepts_for_item(item_id) == [c_id]
         assert index.list_items_for_concept(c_id) == [item_id]
+
+
+class TestRelations:
+    def _make_rel(self, from_id: str, to_id: str, rtype: str = "references") -> Relation:
+        now = int(time.time())
+        return Relation(
+            id="", from_kind="item", from_id=from_id, to_kind="item", to_id=to_id,
+            relation_type=rtype, confidence=0.8, source="llm",
+            rationale=None, created_at=now, invalidated_at=None,
+        )
+
+    def test_add_and_query_both_directions(self, index: MemoryIndex):
+        r = self._make_rel("A", "B")
+        r_id = index.add_relation(r)
+        assert r_id
+        outgoing = index.relations_from("item", "A")
+        incoming = index.relations_to("item", "B")
+        assert len(outgoing) == 1 and outgoing[0].to_id == "B"
+        assert len(incoming) == 1 and incoming[0].from_id == "A"
+
+    def test_invalidate_relation_filters_from_queries(self, index: MemoryIndex):
+        r_id = index.add_relation(self._make_rel("A", "B"))
+        index.invalidate_relation(r_id)
+        assert index.relations_from("item", "A") == []
+        assert index.relations_to("item", "B") == []
+
+
+class TestImpact:
+    def test_query_impact_returns_direct_item_to_item_edge(self, index: MemoryIndex):
+        index.add_relation(Relation(
+            id="", from_kind="item", from_id="X", to_kind="item", to_id="Y",
+            relation_type="depends_on", confidence=0.9, source="llm",
+            rationale=None, created_at=int(time.time()), invalidated_at=None,
+        ))
+        result = index.query_impact("item", "Y")
+        assert any(e.from_id == "X" for e in result.incoming_edges)
+
+
+class TestIssues:
+    def test_add_and_list_open(self, index: MemoryIndex):
+        now = int(time.time())
+        issue = ConsistencyIssue(
+            id="", trigger_event="edit", trigger_ref=None,
+            issue_type="impact_unreviewed",
+            subject_ids='[{"kind":"item","id":"x"}]',
+            description="test", severity="medium", status="open",
+            resolution=None, created_at=now, resolved_at=None,
+        )
+        index.add_issue(issue)
+        opens = index.list_open_issues()
+        assert len(opens) == 1 and opens[0].severity == "medium"
+
+    def test_resolve_issue(self, index: MemoryIndex):
+        now = int(time.time())
+        issue = ConsistencyIssue(
+            id="", trigger_event="edit", trigger_ref=None,
+            issue_type="impact_unreviewed",
+            subject_ids="[]", description="t", severity="low", status="open",
+            resolution=None, created_at=now, resolved_at=None,
+        )
+        issue_id = index.add_issue(issue)
+        index.resolve_issue(issue_id, "ignored", "user ignored")
+        assert index.list_open_issues() == []

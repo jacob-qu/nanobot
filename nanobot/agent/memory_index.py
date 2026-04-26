@@ -65,6 +65,66 @@ def _row_to_concept(row: sqlite3.Row) -> Concept:
     )
 
 
+@dataclass
+class Relation:
+    id: str
+    from_kind: str
+    from_id: str
+    to_kind: str
+    to_id: str
+    relation_type: str
+    confidence: float
+    source: str
+    rationale: str | None
+    created_at: int
+    invalidated_at: int | None
+
+
+@dataclass
+class ConsistencyIssue:
+    id: str
+    trigger_event: str
+    trigger_ref: str | None
+    issue_type: str
+    subject_ids: str  # JSON
+    description: str
+    severity: str
+    status: str
+    resolution: str | None
+    created_at: int
+    resolved_at: int | None
+
+
+@dataclass
+class ImpactResult:
+    target_kind: str
+    target_id: str
+    incoming_edges: list[Relation]
+    outgoing_edges: list[Relation]
+    transitive_nodes: list[tuple[str, str, int]]  # (kind, id, depth)
+
+
+def _row_to_relation(row: sqlite3.Row) -> Relation:
+    return Relation(
+        id=row["id"], from_kind=row["from_kind"], from_id=row["from_id"],
+        to_kind=row["to_kind"], to_id=row["to_id"],
+        relation_type=row["relation_type"], confidence=row["confidence"],
+        source=row["source"], rationale=row["rationale"],
+        created_at=row["created_at"], invalidated_at=row["invalidated_at"],
+    )
+
+
+def _row_to_issue(row: sqlite3.Row) -> ConsistencyIssue:
+    return ConsistencyIssue(
+        id=row["id"], trigger_event=row["trigger_event"],
+        trigger_ref=row["trigger_ref"], issue_type=row["issue_type"],
+        subject_ids=row["subject_ids"], description=row["description"],
+        severity=row["severity"], status=row["status"],
+        resolution=row["resolution"], created_at=row["created_at"],
+        resolved_at=row["resolved_at"],
+    )
+
+
 def _unpack_floats(blob: bytes) -> list[float]:
     n = len(blob) // 4
     return list(struct.unpack(f"{n}f", blob))
@@ -379,6 +439,114 @@ class MemoryIndex:
             "SELECT item_id FROM item_concepts WHERE concept_id=?", (concept_id,),
         )
         return [r["item_id"] for r in cur.fetchall()]
+
+    # ---- relations ----
+    def add_relation(self, r: Relation) -> str:
+        if not r.id:
+            r.id = _new_id()
+        self._db.execute(
+            "INSERT INTO relations (id, from_kind, from_id, to_kind, to_id, "
+            "relation_type, confidence, source, rationale, created_at, invalidated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (r.id, r.from_kind, r.from_id, r.to_kind, r.to_id, r.relation_type,
+             r.confidence, r.source, r.rationale, r.created_at, r.invalidated_at),
+        )
+        self._db.commit()
+        return r.id
+
+    def invalidate_relation(self, relation_id: str) -> None:
+        now = int(time.time())
+        self._db.execute(
+            "UPDATE relations SET invalidated_at=? WHERE id=? AND invalidated_at IS NULL",
+            (now, relation_id),
+        )
+        self._db.commit()
+
+    def relations_from(
+        self, kind: str, id: str, types: list[str] | None = None,
+    ) -> list[Relation]:
+        sql = ("SELECT * FROM relations WHERE from_kind=? AND from_id=? "
+               "AND invalidated_at IS NULL")
+        params: list = [kind, id]
+        if types:
+            sql += f" AND relation_type IN ({','.join('?' * len(types))})"
+            params.extend(types)
+        cur = self._db.execute(sql, params)
+        return [_row_to_relation(r) for r in cur.fetchall()]
+
+    def relations_to(
+        self, kind: str, id: str, types: list[str] | None = None,
+    ) -> list[Relation]:
+        sql = ("SELECT * FROM relations WHERE to_kind=? AND to_id=? "
+               "AND invalidated_at IS NULL")
+        params: list = [kind, id]
+        if types:
+            sql += f" AND relation_type IN ({','.join('?' * len(types))})"
+            params.extend(types)
+        cur = self._db.execute(sql, params)
+        return [_row_to_relation(r) for r in cur.fetchall()]
+
+    # ---- impact ----
+    def query_impact(self, kind: str, id: str, depth: int = 2) -> ImpactResult:
+        incoming = self.relations_to(kind, id)
+        outgoing = self.relations_from(kind, id)
+        visited: set[tuple[str, str]] = {(kind, id)}
+        transitive: list[tuple[str, str, int]] = []
+        frontier: list[tuple[str, str, int]] = [
+            (e.from_kind, e.from_id, 1) for e in incoming
+        ]
+        while frontier:
+            nxt: list[tuple[str, str, int]] = []
+            for fk, fid, d in frontier:
+                if (fk, fid) in visited:
+                    continue
+                visited.add((fk, fid))
+                transitive.append((fk, fid, d))
+                if d < depth:
+                    for e in self.relations_to(fk, fid):
+                        nxt.append((e.from_kind, e.from_id, d + 1))
+            frontier = nxt
+        return ImpactResult(
+            target_kind=kind, target_id=id,
+            incoming_edges=incoming, outgoing_edges=outgoing,
+            transitive_nodes=transitive,
+        )
+
+    # ---- issues ----
+    def add_issue(self, issue: ConsistencyIssue) -> str:
+        if not issue.id:
+            issue.id = _new_id()
+        self._db.execute(
+            "INSERT INTO consistency_issues (id, trigger_event, trigger_ref, "
+            "issue_type, subject_ids, description, severity, status, resolution, "
+            "created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (issue.id, issue.trigger_event, issue.trigger_ref, issue.issue_type,
+             issue.subject_ids, issue.description, issue.severity, issue.status,
+             issue.resolution, issue.created_at, issue.resolved_at),
+        )
+        self._db.commit()
+        return issue.id
+
+    def list_open_issues(
+        self, severity_min: str = "low",
+    ) -> list[ConsistencyIssue]:
+        # severity order: low < medium < high
+        order = {"low": 0, "medium": 1, "high": 2}
+        min_rank = order.get(severity_min, 0)
+        cur = self._db.execute(
+            "SELECT * FROM consistency_issues WHERE status='open' ORDER BY created_at DESC"
+        )
+        all_issues = [_row_to_issue(r) for r in cur.fetchall()]
+        return [i for i in all_issues if order.get(i.severity, 0) >= min_rank]
+
+    def resolve_issue(self, issue_id: str, status: str, resolution: str) -> None:
+        now = int(time.time())
+        self._db.execute(
+            "UPDATE consistency_issues SET status=?, resolution=?, resolved_at=? "
+            "WHERE id=?",
+            (status, resolution, now, issue_id),
+        )
+        self._db.commit()
 
     def close(self) -> None:
         self._db.close()
