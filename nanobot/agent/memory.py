@@ -31,6 +31,7 @@ from nanobot.utils.gitstore import GitStore
 
 if TYPE_CHECKING:
     from nanobot.agent.embedding import EmbeddingService
+    from nanobot.agent.reconcile import ReconcileEngine
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import Session, SessionManager
 
@@ -1200,6 +1201,7 @@ class Dream:
         annotate_line_ages: bool = True,
         notify: Callable[[str], Awaitable[None]] | None = None,
         embedding_service: "EmbeddingService | None" = None,
+        reconcile_engine: "ReconcileEngine | None" = None,
     ):
         self.store = store
         self.provider = provider
@@ -1213,6 +1215,7 @@ class Dream:
         self.annotate_line_ages = annotate_line_ages
         self.notify = notify
         self.embedding_service = embedding_service
+        self.reconcile_engine = reconcile_engine
         self._runner = AgentRunner(provider)
         self._tools = self._build_tools()
 
@@ -1437,6 +1440,27 @@ class Dream:
         self.store.set_last_dream_cursor(new_cursor)
         self.store.compact_history()
 
+        # --- Phase 3: Reconcile (non-fatal) ---
+        if self.reconcile_engine is not None:
+            try:
+                last_sha = self.reconcile_engine.index_last_reconciled_commit()
+                if last_sha:
+                    previous_content = self.store.git.read_file_at(last_sha, "memory/MEMORY.md") or ""
+                else:
+                    previous_content = self.store.git.read_file_at("HEAD", "memory/MEMORY.md") or ""
+                run_result = await self.reconcile_engine.run(
+                    previous_content=previous_content,
+                    trigger_ref=None,  # set below after commit
+                )
+                logger.info(
+                    "Dream reconcile: changes={} added={} removed={} modified={} issues={}",
+                    run_result.total_changes, run_result.added_count,
+                    run_result.removed_count, run_result.modified_count,
+                    run_result.issues_created,
+                )
+            except Exception:
+                logger.exception("Dream Phase 3 (reconcile) failed (non-fatal)")
+
         if result and result.stop_reason == "completed":
             logger.info(
                 "Dream done: {} change(s), cursor advanced to {}",
@@ -1458,6 +1482,13 @@ class Dream:
             sha = self.store.git.auto_commit(commit_msg)
             if sha:
                 logger.info("Dream commit: {}", sha)
+
+        # Update reconcile engine's watermark after successful commit
+        if sha and self.reconcile_engine is not None:
+            try:
+                self.reconcile_engine.set_last_reconciled_commit(sha)
+            except Exception:
+                logger.warning("Dream: update last_reconciled_commit failed (non-fatal)")
 
         # Notify (e.g. Feishu) after commit
         if changelog and self.notify:

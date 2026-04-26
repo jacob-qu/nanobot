@@ -433,3 +433,11 @@ class ReconcileEngine:
             ))
             count += 1
         return count
+
+    # -- watermark helpers ---------------------------------------------------
+
+    def index_last_reconciled_commit(self) -> str | None:
+        return self._index.get_meta("last_reconciled_commit")
+
+    def set_last_reconciled_commit(self, sha: str) -> None:
+        self._index.set_meta("last_reconciled_commit", sha)

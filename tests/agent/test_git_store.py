@@ -232,3 +232,34 @@ class TestMemoryStoreGitProperty:
         from nanobot.agent.memory import MemoryStore
         store = MemoryStore(tmp_path)
         assert store.git is store._git
+
+
+def test_current_commit_returns_sha_after_commit(tmp_path):
+    from nanobot.utils.gitstore import GitStore
+    import subprocess
+    # create minimal repo with a commit
+    (tmp_path / "a.txt").write_text("hello")
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    store = GitStore(tmp_path, tracked_files=["a.txt"])
+    sha = store.current_commit()
+    assert sha and len(sha) == 40
+
+
+def test_read_file_at_returns_content(tmp_path):
+    from nanobot.utils.gitstore import GitStore
+    import subprocess
+    (tmp_path / "a.txt").write_text("hello")
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    store = GitStore(tmp_path, tracked_files=["a.txt"])
+    content = store.read_file_at("HEAD", "a.txt")
+    assert content is not None and "hello" in content

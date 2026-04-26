@@ -638,6 +638,7 @@ def serve(
         session_ttl_minutes=runtime_config.agents.defaults.session_ttl_minutes,
         tools_config=runtime_config.tools,
         embedding_service=embedding_service,
+        memory_index_config=runtime_config.agents.defaults.memory_index,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -735,6 +736,7 @@ def gateway(
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
         tools_config=config.tools,
         embedding_service=embedding_service,
+        memory_index_config=config.agents.defaults.memory_index,
     )
 
     # Set cron callback (needs agent)
@@ -1058,6 +1060,7 @@ def agent(
         session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
         tools_config=config.tools,
         embedding_service=_build_embedding_service(config),
+        memory_index_config=config.agents.defaults.memory_index,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):

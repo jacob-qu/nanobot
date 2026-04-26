@@ -281,6 +281,32 @@ class GitStore:
                 return c, diff
         return None
 
+    def read_file_at(self, ref: str, relpath: str) -> str | None:
+        """Return file content at given git ref (e.g. 'HEAD' or a sha), or None."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "show", f"{ref}:{relpath}"],
+                cwd=str(self._workspace),
+                capture_output=True, text=True, check=False,
+            )
+            return result.stdout if result.returncode == 0 else None
+        except Exception:
+            return None
+
+    def current_commit(self) -> str | None:
+        """Return HEAD commit sha, or None if no commits yet."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(self._workspace),
+                capture_output=True, text=True, check=False,
+            )
+            return result.stdout.strip() if result.returncode == 0 else None
+        except Exception:
+            return None
+
     # -- restore ---------------------------------------------------------------
 
     def revert(self, commit: str) -> str | None:

@@ -37,7 +37,7 @@ from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
-from nanobot.config.schema import AgentDefaults
+from nanobot.config.schema import AgentDefaults, MemoryIndexConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.document import extract_documents
@@ -166,6 +166,7 @@ class AgentLoop:
         disabled_skills: list[str] | None = None,
         tools_config: ToolsConfig | None = None,
         embedding_service: "EmbeddingService | None" = None,
+        memory_index_config: MemoryIndexConfig | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
@@ -262,11 +263,48 @@ class AgentLoop:
             session_ttl_minutes=session_ttl_minutes,
             context_window_tokens=self.context_window_tokens,
         )
+        reconcile_engine = None
+        if (
+            memory_index_config is not None
+            and memory_index_config.enabled
+            and self._embedding_service is not None
+        ):
+            try:
+                from nanobot.agent.memory_index import MemoryIndex
+                from nanobot.agent.reconcile import ReconcileEngine
+                from nanobot.agent.reconcile_adapter import ProviderLLMAdapter
+
+                memory_store = self.context.memory
+                index_path = memory_store.memory_dir / memory_index_config.db_filename
+                self._memory_index = MemoryIndex(
+                    db_path=index_path,
+                    embedding_dim=self._embedding_service.dimensions,
+                )
+                llm_model = memory_index_config.llm_model or self.model
+                reconcile_engine = ReconcileEngine(
+                    index=self._memory_index,
+                    embedding=self._embedding_service,
+                    llm=ProviderLLMAdapter(provider, llm_model),
+                    memory_file=memory_store.memory_file,
+                    source_file="memory/MEMORY.md",
+                    threshold=memory_index_config.similarity_threshold,
+                    concept_top_k=memory_index_config.concept_top_k_candidates,
+                    relation_top_k=memory_index_config.relation_top_k_neighbors,
+                )
+            except Exception:
+                from loguru import logger as _log
+                _log.exception("MemoryIndex init failed; reconcile disabled")
+                self._memory_index = None
+                reconcile_engine = None
+        else:
+            self._memory_index = None
+
         self.dream = Dream(
             store=self.context.memory,
             provider=provider,
             model=self.model,
             embedding_service=self._embedding_service,
+            reconcile_engine=reconcile_engine,
         )
         self._register_default_tools()
         if _tc.my.enable:
