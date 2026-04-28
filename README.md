@@ -1686,7 +1686,9 @@ How it works:
 
 Time is context. Context should be precise.
 
-By default, nanobot uses `UTC` for runtime time context. If you want the agent to think in your local time, set `agents.defaults.timezone` to a valid [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones):
+Runtime time strings shown to the model (runtime context block and heartbeat prompts) are always rendered in `Asia/Shanghai` (UTC+8), so the agent never has to do UTC offset math in its head.
+
+If you want a different default timezone for **cron schedules** (when a cron expression omits `tz`) and for **one-shot `at` times** (when the ISO datetime has no explicit offset), set `agents.defaults.timezone` to a valid [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones):
 
 ```json
 {
@@ -1697,8 +1699,6 @@ By default, nanobot uses `UTC` for runtime time context. If you want the agent t
   }
 }
 ```
-
-This affects runtime time strings shown to the model, such as runtime context and heartbeat prompts. It also becomes the default timezone for cron schedules when a cron expression omits `tz`, and for one-shot `at` times when the ISO datetime has no explicit offset.
 
 Common examples: `UTC`, `America/New_York`, `America/Los_Angeles`, `Europe/London`, `Europe/Berlin`, `Asia/Tokyo`, `Asia/Shanghai`, `Asia/Singapore`, `Australia/Sydney`.
 

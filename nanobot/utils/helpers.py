@@ -62,19 +62,28 @@ def timestamp() -> str:
 
 
 def current_time_str(timezone: str | None = None) -> str:
-    """Return the current time string."""
+    """Return the current time string for Runtime Context injection.
+
+    Defaults to Asia/Shanghai when *timezone* is unset so the agent always
+    sees a concrete local time instead of needing to mentally offset UTC.
+    """
     from zoneinfo import ZoneInfo
 
+    tz_name = timezone or "Asia/Shanghai"
     try:
-        tz = ZoneInfo(timezone) if timezone else None
-    except (KeyError, Exception):
-        tz = None
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = "Asia/Shanghai"
+        tz = ZoneInfo(tz_name)
 
-    now = datetime.now(tz=tz) if tz else datetime.now().astimezone()
-    offset = now.strftime("%z")
-    offset_fmt = f"{offset[:3]}:{offset[3:]}" if len(offset) == 5 else offset
-    tz_name = timezone or (time.strftime("%Z") or "UTC")
-    return f"{now.strftime('%Y-%m-%d %H:%M (%A)')} ({tz_name}, UTC{offset_fmt})"
+    now = datetime.now(tz=tz)
+    offset = now.strftime("%z")  # e.g. "+0800", "-0400", "+0530"
+    if len(offset) == 5:
+        sign, hours, minutes = offset[0], int(offset[1:3]), int(offset[3:5])
+        offset_fmt = f"{sign}{hours}:{minutes:02d}" if minutes else f"{sign}{hours}"
+    else:
+        offset_fmt = offset
+    return f"{now.strftime('%Y-%m-%d %H:%M (%A)')} (UTC{offset_fmt}, {tz_name})"
 
 
 _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
