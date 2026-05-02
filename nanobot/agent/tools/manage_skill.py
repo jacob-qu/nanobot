@@ -11,6 +11,7 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
 
 if TYPE_CHECKING:
+    from nanobot.agent.skill_usage import SkillUsageStore
     from nanobot.agent.skills import SkillsLoader
 
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
@@ -31,10 +32,16 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---", re.DOTALL)
 class ManageSkillTool(Tool):
     """Tool to manage workspace skills at runtime."""
 
-    def __init__(self, workspace_dir: Path, skills_loader: SkillsLoader):
+    def __init__(
+        self,
+        workspace_dir: Path,
+        skills_loader: SkillsLoader,
+        skill_usage: SkillUsageStore | None = None,
+    ):
         self._workspace_dir = workspace_dir
         self._loader = skills_loader
         self._skills_dir = workspace_dir / "skills"
+        self._usage = skill_usage
 
     @property
     def name(self) -> str:
@@ -166,6 +173,8 @@ class ManageSkillTool(Tool):
         skill_dir = self._skills_dir / name
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        if self._usage is not None:
+            self._usage.record_create(name)
         return f"Skill {name!r} created successfully."
 
     def _do_edit(self, name: str | None, content: str | None) -> str:
@@ -182,6 +191,8 @@ class ManageSkillTool(Tool):
                 return f"Skill {name!r} is a builtin skill and cannot be edited directly."
             return f"Skill {name!r} not found in workspace."
         (self._skills_dir / name / "SKILL.md").write_text(content, encoding="utf-8")
+        if self._usage is not None:
+            self._usage.bump_patch(name)
         return f"Skill {name!r} updated successfully."
 
     def _do_patch(self, name: str | None, old_string: str | None, new_string: str | None) -> str:
@@ -205,6 +216,8 @@ class ManageSkillTool(Tool):
         if count > 1:
             return f"old_string found {count} times in skill {name!r}; must be unique."
         skill_file.write_text(current.replace(old_string, new_string, 1), encoding="utf-8")
+        if self._usage is not None:
+            self._usage.bump_patch(name)
         return f"Skill {name!r} patched successfully."
 
     def _do_delete(self, name: str | None) -> str:
@@ -217,4 +230,6 @@ class ManageSkillTool(Tool):
                 return f"Skill {name!r} is a builtin skill and cannot be deleted."
             return f"Skill {name!r} not found in workspace."
         shutil.rmtree(self._skills_dir / name)
+        if self._usage is not None:
+            self._usage.forget(name)
         return f"Skill {name!r} deleted successfully."

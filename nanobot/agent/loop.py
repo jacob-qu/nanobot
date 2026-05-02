@@ -376,10 +376,13 @@ class AgentLoop:
             self.tools.register(ListOpenIssuesTool(self._memory_index))
             self.tools.register(ResolveIssuesTool(self._memory_index))
             self.tools.register(TriggerDreamTool(self.dream))
+        from nanobot.agent.skill_usage import SkillUsageStore
+        self.skill_usage = SkillUsageStore(self.workspace)
         self.tools.register(
             ManageSkillTool(
                 workspace_dir=self.workspace,
                 skills_loader=self.context.skills,
+                skill_usage=self.skill_usage,
             )
         )
 
