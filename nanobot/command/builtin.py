@@ -367,6 +367,8 @@ def build_help_text() -> str:
         "/dream-log — Show what the last Dream changed",
         "/dream-restore — Revert memory to a previous state",
         "/memory-reindex — Backfill vector index for past conversations",
+        "/goal <text> — Set a standing goal (Ralph loop); bare /goal shows status",
+        "/goal pause | resume | clear — Control an active goal",
         "/help — Show available commands",
     ]
     return "\n".join(lines)
@@ -374,6 +376,7 @@ def build_help_text() -> str:
 
 def register_builtin_commands(router: CommandRouter) -> None:
     """Register the default set of slash commands."""
+    from nanobot.command.goals_cmd import cmd_goal
     router.priority("/stop", cmd_stop)
     router.priority("/restart", cmd_restart)
     router.priority("/status", cmd_status)
@@ -385,4 +388,6 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/dream-restore", cmd_dream_restore)
     router.prefix("/dream-restore ", cmd_dream_restore)
     router.exact("/memory-reindex", cmd_memory_reindex)
+    router.exact("/goal", cmd_goal)
+    router.prefix("/goal ", cmd_goal)
     router.exact("/help", cmd_help)

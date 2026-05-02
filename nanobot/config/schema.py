@@ -114,6 +114,23 @@ class CuratorConfig(Base):
     backup_keep: int = Field(default=5, ge=0)  # 保留的快照数量
 
 
+class GoalsConfig(Base):
+    """Persistent cross-turn goals（`/goal` Ralph loop）配置。
+
+    目标跨 turn 持续，每轮结束后由 judge LLM 判断是否完成；未完成则自动喂续发
+    prompt 到 bus。失败 fail-open 到 continue，turn budget 是硬兜底。
+    """
+
+    enabled: bool = True  # 命令可用；实际是否跑由用户 `/goal <text>` 触发
+    max_turns: int = Field(default=20, ge=1)  # 续发预算
+    judge_model_override: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "judgeModelOverride", "model", "judge_model_override"
+        ),
+    )  # None = 用主模型
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -144,6 +161,7 @@ class AgentDefaults(Base):
     memory_index: MemoryIndexConfig = Field(default_factory=MemoryIndexConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
     curator: CuratorConfig = Field(default_factory=CuratorConfig)
+    goals: GoalsConfig = Field(default_factory=GoalsConfig)
 
 
 class AgentsConfig(Base):

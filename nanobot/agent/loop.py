@@ -46,7 +46,7 @@ from nanobot.utils.helpers import truncate_text as truncate_text_fn
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, ToolsConfig, WebToolsConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, GoalsConfig, ToolsConfig, WebToolsConfig
     from nanobot.cron.service import CronService
 
 
@@ -167,8 +167,9 @@ class AgentLoop:
         tools_config: ToolsConfig | None = None,
         embedding_service: "EmbeddingService | None" = None,
         memory_index_config: MemoryIndexConfig | None = None,
+        goals_config: "GoalsConfig | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
+        from nanobot.config.schema import ExecToolConfig, GoalsConfig, ToolsConfig, WebToolsConfig
 
         _tc = tools_config or ToolsConfig()
         self._approval_config = _tc.approval
@@ -196,6 +197,7 @@ class AgentLoop:
         self.provider_retry_mode = provider_retry_mode
         self.web_config = web_config or WebToolsConfig()
         self.exec_config = exec_config or ExecToolConfig()
+        self.goals_config = goals_config or GoalsConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
@@ -660,6 +662,15 @@ class AgentLoop:
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="", metadata=msg.metadata or {},
                         ))
+
+                    # /goal hook — after a successful turn, judge the goal and
+                    # enqueue a continuation if needed. Failures are swallowed
+                    # so a broken judge can't take down the main loop.
+                    if response is not None and response.content:
+                        try:
+                            await self._evaluate_goal_after_turn(msg, session_key, response.content)
+                        except Exception:
+                            logger.exception("Goal evaluation failed for session {}", session_key)
                 except asyncio.CancelledError:
                     logger.info("Task cancelled for session {}", session_key)
                     raise
@@ -688,6 +699,57 @@ class AgentLoop:
                         "Re-published {} leftover message(s) to bus for session {}",
                         leftover, session_key,
                     )
+
+    async def _evaluate_goal_after_turn(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+        final_content: str,
+    ) -> None:
+        """Run the goal judge after a turn and enqueue continuation if needed.
+
+        No-op when no goal is set on the session, or when the goal is not in
+        ``active`` state. User-visible status lines are delivered as
+        outbound messages to the same chat. A continuation prompt is
+        enqueued via the bus as a regular user-role InboundMessage so that
+        real user messages arriving in the meantime preempt it naturally
+        (bus is FIFO).
+        """
+        from nanobot.agent.goals import GoalManager
+
+        session = self.sessions.get_or_create(session_key)
+        mgr = GoalManager(session, default_max_turns=self.goals_config.max_turns)
+        if not mgr.is_active():
+            return
+
+        judge_model = self.goals_config.judge_model_override or self.model
+        decision = await mgr.evaluate_after_turn(
+            final_content,
+            provider=self.provider,
+            model=judge_model,
+        )
+        # Persist state change (evaluate_after_turn mutates session.metadata).
+        self.sessions.save(session)
+
+        status_message = decision.get("message") or ""
+        if status_message:
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=status_message,
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+
+        if decision.get("should_continue") and decision.get("continuation_prompt"):
+            meta = dict(msg.metadata or {})
+            meta["_goal_continuation"] = True
+            await self.bus.publish_inbound(InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content=decision["continuation_prompt"],
+                metadata=meta,
+            ))
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
