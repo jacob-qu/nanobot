@@ -531,8 +531,6 @@ class ReconcileEngine:
             statuses=("open", "resolved", "wontfix"),
         )
         if existing is None:
-            if issue.last_seen_at is None:
-                issue.last_seen_at = issue.created_at
             self._index.add_issue(issue)
             return EmitResult.NEW
         if existing.status == "open":
