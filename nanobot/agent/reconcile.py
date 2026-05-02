@@ -6,6 +6,7 @@ import json
 import struct
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,6 +19,7 @@ from nanobot.agent.memory_index import (
     ItemRecord,
     MemoryIndex,
     Relation,
+    _subject_key,
 )
 from nanobot.agent.reconcile_diff import DiffResult, align_items
 from nanobot.utils.prompt_templates import render_template
@@ -59,6 +61,13 @@ class RunResult:
     issues_created: int
 
 
+class EmitResult(str, Enum):
+    NEW = "new"
+    REOPENED = "reopened"
+    DEDUPED = "deduped"
+    SUPPRESSED = "suppressed"
+
+
 def _chunks_equal(a: list[Chunk], b: list[Chunk]) -> bool:
     if len(a) != len(b):
         return False
@@ -87,6 +96,7 @@ class ReconcileEngine:
         self._threshold = threshold
         self._concept_top_k = concept_top_k
         self._relation_top_k = relation_top_k
+        self._last_counters: dict[EmitResult, int] = {r: 0 for r in EmitResult}
 
     # -- bootstrap --------------------------------------------------------
 
@@ -270,6 +280,7 @@ class ReconcileEngine:
         self, previous_content: str, trigger_ref: str | None = None,
     ) -> RunResult:
         """Diff previous_content vs current MEMORY.md, update index, emit issues."""
+        self._last_counters = {r: 0 for r in EmitResult}
         current_content = (
             self._memory_file.read_text(encoding="utf-8")
             if self._memory_file.exists() else ""
@@ -343,6 +354,7 @@ class ReconcileEngine:
             changed_ids.append(existing.id)
 
         # Ambiguous → write id_remap_ambiguous issue, tombstone olds, insert news
+        ambiguous_counters: dict[EmitResult, int] = {r: 0 for r in EmitResult}
         for grp in diff.ambiguous:
             for ch in grp.olds:
                 ex = self._find_item_by_hash(ch.content_hash)
@@ -360,16 +372,19 @@ class ReconcileEngine:
                 new_item_ids.append(nid)
                 changed_chunks.append(ch)
                 changed_ids.append(nid)
-            self._index.add_issue(ConsistencyIssue(
+            ambig_issue = ConsistencyIssue(
                 id="", trigger_event="dream_scan", trigger_ref=trigger_ref,
                 issue_type="id_remap_ambiguous",
                 subject_ids=json.dumps(
-                    [{"kind": "item", "hash": c.content_hash} for c in grp.olds + grp.news],
+                    [{"kind": "item", "hash": c.content_hash}
+                     for c in grp.olds + grp.news],
                     ensure_ascii=False),
-                description=f"ID 对齐歧义 ({grp.kind}): {len(grp.olds)} 老条目 vs {len(grp.news)} 新条目",
+                description=f"ID 对齐歧义 ({grp.kind}): "
+                            f"{len(grp.olds)} 老条目 vs {len(grp.news)} 新条目",
                 severity="medium", status="open", resolution=None,
                 created_at=now, resolved_at=None,
-            ))
+            )
+            ambiguous_counters[self._emit_issue(ambig_issue, now)] += 1
 
         # LLM concept + relation on changed set
         if changed_chunks:
@@ -387,6 +402,18 @@ class ReconcileEngine:
                 continue  # new items have no prior impact graph
             issues_created += await self._review_impact(item_id, trigger_ref, now)
 
+        self._emit_counters_acc(ambiguous_counters)
+        issues_created += (
+            ambiguous_counters[EmitResult.NEW]
+            + ambiguous_counters[EmitResult.REOPENED]
+        )
+        logger.info(
+            "reconcile: issues new={} reopened={} deduped={} suppressed={}",
+            self._last_counters[EmitResult.NEW],
+            self._last_counters[EmitResult.REOPENED],
+            self._last_counters[EmitResult.DEDUPED],
+            self._last_counters[EmitResult.SUPPRESSED],
+        )
         return RunResult(
             total_changes=len(diff.added) + len(diff.removed) + len(diff.modified),
             added_count=len(diff.added),
@@ -463,14 +490,14 @@ class ReconcileEngine:
         raw = await self._llm.complete(prompt)
         verdicts = _parse_json_array(raw)
 
-        count = 0
+        counters = {r: 0 for r in EmitResult}
         for v in verdicts:
             if not v.get("relevant"):
                 continue
             cand_id = v.get("candidate_id")
             if not cand_id or cand_id not in seen_cand:
                 continue
-            self._index.add_issue(ConsistencyIssue(
+            issue = ConsistencyIssue(
                 id="", trigger_event="dream_scan", trigger_ref=trigger_ref,
                 issue_type="impact_unreviewed",
                 subject_ids=json.dumps(
@@ -481,11 +508,44 @@ class ReconcileEngine:
                 severity=v.get("severity", "medium"),
                 status="open", resolution=None,
                 created_at=now, resolved_at=None,
-            ))
-            count += 1
-        return count
+            )
+            counters[self._emit_issue(issue, now)] += 1
+        self._emit_counters_acc(counters)
+        # user-visible "new" count = NEW + REOPENED
+        return counters[EmitResult.NEW] + counters[EmitResult.REOPENED]
 
     # -- watermark helpers ---------------------------------------------------
+
+    def _emit_issue(self, issue: ConsistencyIssue, now: int) -> EmitResult:
+        """Dedup/reopen/suppress/insert decision.
+
+        - 未命中：插入新行
+        - open 命中：bump seen_count / last_seen_at
+        - resolved 命中：重开（status=open, seen_count+1, 清空 resolution）
+        - wontfix 命中：静默跳过
+        """
+        key = _subject_key(issue.issue_type, issue.subject_ids)
+        existing = self._index.find_issue_by_subject(
+            issue.issue_type,
+            key,
+            statuses=("open", "resolved", "wontfix"),
+        )
+        if existing is None:
+            if issue.last_seen_at is None:
+                issue.last_seen_at = issue.created_at
+            self._index.add_issue(issue)
+            return EmitResult.NEW
+        if existing.status == "open":
+            self._index.bump_issue_seen(existing.id, now)
+            return EmitResult.DEDUPED
+        if existing.status == "wontfix":
+            return EmitResult.SUPPRESSED
+        self._index.reopen_issue(existing.id, now)
+        return EmitResult.REOPENED
+
+    def _emit_counters_acc(self, counters: dict[EmitResult, int]) -> None:
+        for k, v in counters.items():
+            self._last_counters[k] += v
 
     def index_last_reconciled_commit(self) -> str | None:
         return self._index.get_meta("last_reconciled_commit")

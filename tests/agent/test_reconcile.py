@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from nanobot.agent.memory_index import MemoryIndex
+from nanobot.agent.memory_index import ConsistencyIssue, MemoryIndex
 from nanobot.agent.reconcile import ReconcileEngine
 
 
@@ -159,3 +159,92 @@ class TestIncrementalRun:
 
         # at least 1 change should be processed (the modified rule item)
         assert changes.total_changes >= 1
+
+
+class TestEmitIssue:
+    def _engine(self, index: MemoryIndex, tmp_path: Path) -> ReconcileEngine:
+        md_file = tmp_path / "MEMORY.md"
+        md_file.write_text("")
+        return ReconcileEngine(
+            index=index,
+            embedding=_FakeEmbedding(),
+            llm=_FakeLLM(responses=[]),
+            memory_file=md_file,
+            source_file="memory/MEMORY.md",
+        )
+
+    def _issue(self, a: str = "a", b: str = "b") -> ConsistencyIssue:
+        return ConsistencyIssue(
+            id="", trigger_event="dream_scan", trigger_ref=None,
+            issue_type="impact_unreviewed",
+            subject_ids=f'[{{"kind":"item","id":"{a}"}},'
+                        f'{{"kind":"item","id":"{b}"}}]',
+            description="x", severity="medium", status="open",
+            resolution=None, created_at=1000, resolved_at=None,
+        )
+
+    def test_emit_new(self, index: MemoryIndex, tmp_path: Path):
+        from nanobot.agent.reconcile import EmitResult
+        engine = self._engine(index, tmp_path)
+        result = engine._emit_issue(self._issue(), now=1000)
+        assert result == EmitResult.NEW
+        assert len(index.list_open_issues()) == 1
+
+    def test_emit_deduped_against_open(self, index: MemoryIndex, tmp_path: Path):
+        from nanobot.agent.reconcile import EmitResult
+        engine = self._engine(index, tmp_path)
+        engine._emit_issue(self._issue(), now=1000)
+        result = engine._emit_issue(self._issue(), now=2000)
+        assert result == EmitResult.DEDUPED
+        opens = index.list_open_issues()
+        assert len(opens) == 1
+        assert opens[0].seen_count == 2
+        assert opens[0].last_seen_at == 2000
+
+    def test_emit_reopens_resolved(self, index: MemoryIndex, tmp_path: Path):
+        from nanobot.agent.reconcile import EmitResult
+        engine = self._engine(index, tmp_path)
+        engine._emit_issue(self._issue(), now=1000)
+        opens = index.list_open_issues()
+        index.resolve_issue(opens[0].id, "resolved", "done")
+        assert index.list_open_issues() == []
+        result = engine._emit_issue(self._issue(), now=3000)
+        assert result == EmitResult.REOPENED
+        opens = index.list_open_issues()
+        assert len(opens) == 1
+        assert opens[0].status == "open"
+        assert opens[0].seen_count == 2
+        assert opens[0].resolution is None
+
+    def test_emit_suppresses_wontfix(self, index: MemoryIndex, tmp_path: Path):
+        from nanobot.agent.reconcile import EmitResult
+        engine = self._engine(index, tmp_path)
+        engine._emit_issue(self._issue(), now=1000)
+        opens = index.list_open_issues()
+        index.resolve_issue(opens[0].id, "wontfix", "ignored")
+        result = engine._emit_issue(self._issue(), now=4000)
+        assert result == EmitResult.SUPPRESSED
+        assert index.list_open_issues() == []
+
+    def test_connected_three_runs_dedup(self, index: MemoryIndex, tmp_path: Path):
+        engine = self._engine(index, tmp_path)
+        for ts in (1000, 2000, 3000):
+            engine._emit_issue(self._issue("a", "b"), now=ts)
+        opens = index.list_open_issues()
+        assert len(opens) == 1
+        assert opens[0].seen_count == 3
+        assert opens[0].last_seen_at == 3000
+
+    def test_resolved_then_redetected_reopens(
+        self, index: MemoryIndex, tmp_path: Path,
+    ):
+        engine = self._engine(index, tmp_path)
+        engine._emit_issue(self._issue("a", "b"), now=1000)
+        issue_id = index.list_open_issues()[0].id
+        index.resolve_issue(issue_id, "resolved", "handled")
+        engine._emit_issue(self._issue("a", "b"), now=5000)
+        opens = index.list_open_issues()
+        assert len(opens) == 1
+        assert opens[0].id == issue_id
+        assert opens[0].status == "open"
+        assert opens[0].seen_count == 2
