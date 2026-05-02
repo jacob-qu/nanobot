@@ -20,13 +20,22 @@ class TestSchemaCreation:
                 "consistency_issues", "metadata"} <= set(tables)
 
     def test_metadata_defaults(self, index: MemoryIndex):
-        assert index.get_meta("schema_version") == "1"
+        assert index.get_meta("schema_version") == "2"
         assert index.get_meta("embedding_dim") == "1536"
         assert index.get_meta("last_reconciled_commit") is None
 
     def test_set_and_get_meta(self, index: MemoryIndex):
         index.set_meta("last_reconciled_commit", "abc123")
         assert index.get_meta("last_reconciled_commit") == "abc123"
+
+    def test_consistency_issues_has_v2_columns(self, index: MemoryIndex):
+        cur = index._db.execute("PRAGMA table_info(consistency_issues)")
+        cols = {row["name"] for row in cur.fetchall()}
+        assert "last_seen_at" in cols
+        assert "seen_count" in cols
+
+    def test_schema_version_is_v2(self, index: MemoryIndex):
+        assert index.get_meta("schema_version") == "2"
 
 
 class TestItemsCRUD:
@@ -227,3 +236,56 @@ class TestIssues:
         issue_id = index.add_issue(issue)
         index.resolve_issue(issue_id, "ignored", "user ignored")
         assert index.list_open_issues() == []
+
+
+class TestSchemaMigration:
+    def test_v1_db_migrates_to_v2(self, tmp_path: Path):
+        import sqlite3 as _sqlite
+        db_path = tmp_path / "v1.db"
+
+        # Hand-craft a v1 DB: old schema without last_seen_at / seen_count
+        raw = _sqlite.connect(str(db_path))
+        raw.executescript(
+            """
+            CREATE TABLE consistency_issues (
+              id TEXT PRIMARY KEY,
+              trigger_event TEXT NOT NULL,
+              trigger_ref TEXT,
+              issue_type TEXT NOT NULL,
+              subject_ids TEXT NOT NULL,
+              description TEXT NOT NULL,
+              severity TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'open',
+              resolution TEXT,
+              created_at INTEGER NOT NULL,
+              resolved_at INTEGER
+            );
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO metadata VALUES ('schema_version','1');
+            INSERT INTO metadata VALUES ('embedding_dim','1536');
+            INSERT INTO consistency_issues VALUES (
+              'old-id','dream_scan',NULL,'impact_unreviewed',
+              '[{"kind":"item","id":"a"},{"kind":"item","id":"b"}]',
+              'desc','medium','open',NULL,1000,NULL
+            );
+            """
+        )
+        raw.commit()
+        raw.close()
+
+        # Re-open via MemoryIndex — should trigger migration
+        idx = MemoryIndex(db_path=db_path, embedding_dim=1536)
+        assert idx.get_meta("schema_version") == "2"
+
+        cur = idx._db.execute("PRAGMA table_info(consistency_issues)")
+        cols = {row["name"] for row in cur.fetchall()}
+        assert "last_seen_at" in cols
+        assert "seen_count" in cols
+
+        # Old row backfilled: last_seen_at == created_at; seen_count == 1
+        cur = idx._db.execute(
+            "SELECT last_seen_at, seen_count FROM consistency_issues WHERE id='old-id'"
+        )
+        row = cur.fetchone()
+        assert row["last_seen_at"] == 1000
+        assert row["seen_count"] == 1

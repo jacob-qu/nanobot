@@ -93,6 +93,8 @@ class ConsistencyIssue:
     resolution: str | None
     created_at: int
     resolved_at: int | None
+    last_seen_at: int | None = None
+    seen_count: int = 1
 
 
 @dataclass
@@ -122,6 +124,8 @@ def _row_to_issue(row: sqlite3.Row) -> ConsistencyIssue:
         severity=row["severity"], status=row["status"],
         resolution=row["resolution"], created_at=row["created_at"],
         resolved_at=row["resolved_at"],
+        last_seen_at=row["last_seen_at"],
+        seen_count=row["seen_count"],
     )
 
 
@@ -202,7 +206,9 @@ CREATE TABLE IF NOT EXISTS consistency_issues (
   status         TEXT NOT NULL DEFAULT 'open',
   resolution     TEXT,
   created_at     INTEGER NOT NULL,
-  resolved_at    INTEGER
+  resolved_at    INTEGER,
+  last_seen_at   INTEGER,
+  seen_count     INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_issues_status ON consistency_issues(status, created_at);
 
@@ -212,7 +218,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 """
 
-_SCHEMA_VERSION = "1"
+_SCHEMA_VERSION = "2"
 
 
 class MemoryIndex:
@@ -229,6 +235,29 @@ class MemoryIndex:
 
     def _init_schema(self, embedding_dim: int) -> None:
         self._db.executescript(_SCHEMA_SQL)
+
+        # ---- migrations ------------------------------------------------
+        stored_version = self.get_meta("schema_version")
+        if stored_version == "1":
+            cur = self._db.execute("PRAGMA table_info(consistency_issues)")
+            existing_cols = {row["name"] for row in cur.fetchall()}
+            if "last_seen_at" not in existing_cols:
+                self._db.execute(
+                    "ALTER TABLE consistency_issues ADD COLUMN last_seen_at INTEGER"
+                )
+            if "seen_count" not in existing_cols:
+                self._db.execute(
+                    "ALTER TABLE consistency_issues "
+                    "ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 1"
+                )
+            self._db.execute(
+                "UPDATE consistency_issues "
+                "SET last_seen_at = created_at WHERE last_seen_at IS NULL"
+            )
+            self.set_meta("schema_version", "2")
+            self._db.commit()
+
+        # ---- embedding dim guard --------------------------------------
         stored_dim = self.get_meta("embedding_dim")
         if stored_dim is None:
             self.set_meta("embedding_dim", str(embedding_dim))
@@ -548,13 +577,18 @@ class MemoryIndex:
     def add_issue(self, issue: ConsistencyIssue) -> str:
         if not issue.id:
             issue.id = _new_id()
+        if issue.last_seen_at is None:
+            issue.last_seen_at = issue.created_at
         self._db.execute(
-            "INSERT INTO consistency_issues (id, trigger_event, trigger_ref, "
-            "issue_type, subject_ids, description, severity, status, resolution, "
-            "created_at, resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO consistency_issues ("
+            "id, trigger_event, trigger_ref, issue_type, subject_ids, "
+            "description, severity, status, resolution, "
+            "created_at, resolved_at, last_seen_at, seen_count"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (issue.id, issue.trigger_event, issue.trigger_ref, issue.issue_type,
              issue.subject_ids, issue.description, issue.severity, issue.status,
-             issue.resolution, issue.created_at, issue.resolved_at),
+             issue.resolution, issue.created_at, issue.resolved_at,
+             issue.last_seen_at, issue.seen_count),
         )
         self._db.commit()
         return issue.id
