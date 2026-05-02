@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool, tool_parameters
-from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
+from nanobot.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
 
 if TYPE_CHECKING:
     from nanobot.agent.memory import Dream
@@ -329,3 +329,90 @@ class TriggerDreamTool(Tool):
             f"{'详情用 list_open_issues 查看。' if open_issues else ''}"
             f"{tail}"
         )
+
+
+_VALID_RESOLVE_STATUSES = ("resolved", "wontfix")
+
+
+@tool_parameters(tool_parameters_schema(
+    issue_ids=ArraySchema(
+        description="要关闭的告警 id 列表（从 list_open_issues 获取）。至少一个。",
+        items=StringSchema("告警 id"),
+    ),
+    resolution=StringSchema(
+        "关闭理由。必填；resolved 时说明如何处理，wontfix 时说明为何忽略。"
+    ),
+    status=StringSchema(
+        "关闭状态：'resolved'（已处理，再次检测会重开）或 "
+        "'wontfix'（永久忽略，再次检测会沉默跳过）。默认 resolved。"
+    ),
+))
+class ResolveIssuesTool(Tool):
+    """Batch-close one or more Dream consistency issues."""
+
+    def __init__(self, index: "MemoryIndex"):
+        self._index = index
+
+    @property
+    def name(self) -> str:
+        return "resolve_issues"
+
+    @property
+    def description(self) -> str:
+        return (
+            "关闭一条或多条 Dream 一致性告警（由 list_open_issues 查得）。"
+            "status='resolved' 表示已处理（再次检测会重开）；"
+            "'wontfix' 表示永久忽略（再次检测会沉默跳过）。"
+            "**看完 list_open_issues 后请务必用此工具关闭已处理项**，否则告警会持续堆积。"
+            "resolution 必填，简述处理方式或忽略原因。"
+        )
+
+    @property
+    def read_only(self) -> bool:
+        return False
+
+    async def execute(
+        self,
+        issue_ids: list[str] | None = None,
+        resolution: str = "",
+        status: str = "resolved",
+        **kwargs: Any,
+    ) -> str:
+        if not issue_ids:
+            return "错误：issue_ids 不能为空。"
+        if not resolution.strip():
+            return "错误：resolution 不能为空或仅空白字符。"
+        if status not in _VALID_RESOLVE_STATUSES:
+            return (
+                f"错误：status 必须是 {_VALID_RESOLVE_STATUSES} 之一，收到 {status!r}。"
+            )
+
+        closed: list[tuple[str, str]] = []   # (id, issue_type)
+        skipped: list[str] = []              # human-readable reasons
+
+        for issue_id in issue_ids:
+            cur = self._index._db.execute(
+                "SELECT status, issue_type FROM consistency_issues WHERE id=?",
+                (issue_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                skipped.append(f"- {issue_id}：不存在")
+                continue
+            if row["status"] != "open":
+                skipped.append(
+                    f"- {issue_id}：当前状态为 {row['status']}，无需重复关闭"
+                )
+                continue
+            self._index.resolve_issue(issue_id, status, resolution.strip())
+            closed.append((issue_id, row["issue_type"]))
+
+        lines: list[str] = []
+        lines.append(f"已关闭 {len(closed)} 条告警（status={status}）：")
+        for cid, ctype in closed:
+            lines.append(f"- {cid} {ctype}")
+        if skipped:
+            lines.append("")
+            lines.append(f"跳过 {len(skipped)} 条：")
+            lines.extend(skipped)
+        return "\n".join(lines)

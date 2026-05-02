@@ -368,11 +368,13 @@ class AgentLoop:
                 GetMemoryConceptTool,
                 ListOpenIssuesTool,
                 QueryMemoryImpactTool,
+                ResolveIssuesTool,
                 TriggerDreamTool,
             )
             self.tools.register(GetMemoryConceptTool(self._memory_index))
             self.tools.register(QueryMemoryImpactTool(self._memory_index))
             self.tools.register(ListOpenIssuesTool(self._memory_index))
+            self.tools.register(ResolveIssuesTool(self._memory_index))
             self.tools.register(TriggerDreamTool(self.dream))
         self.tools.register(
             ManageSkillTool(
