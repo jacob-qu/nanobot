@@ -354,3 +354,85 @@ class TestSubjectKey:
         assert isinstance(key, str)
         assert "impact_unreviewed" in key
 
+
+class TestIssueLifecycleHelpers:
+    def _make_impact_issue(
+        self, item_a: str = "a", item_b: str = "b",
+        status: str = "open", created_at: int = 1000,
+    ) -> ConsistencyIssue:
+        return ConsistencyIssue(
+            id="",
+            trigger_event="dream_scan",
+            trigger_ref=None,
+            issue_type="impact_unreviewed",
+            subject_ids=f'[{{"kind":"item","id":"{item_a}"}},'
+                        f'{{"kind":"item","id":"{item_b}"}}]',
+            description="desc",
+            severity="medium",
+            status=status,
+            resolution=None,
+            created_at=created_at,
+            resolved_at=None,
+        )
+
+    def test_find_issue_by_subject_open(self, index: MemoryIndex):
+        from nanobot.agent.memory_index import _subject_key
+        issue_id = index.add_issue(self._make_impact_issue("a", "b"))
+        key = _subject_key(
+            "impact_unreviewed",
+            '[{"kind":"item","id":"b"},{"kind":"item","id":"a"}]',
+        )
+        found = index.find_issue_by_subject("impact_unreviewed", key)
+        assert found is not None
+        assert found.id == issue_id
+
+    def test_find_issue_by_subject_filters_status(self, index: MemoryIndex):
+        from nanobot.agent.memory_index import _subject_key
+        issue = self._make_impact_issue("a", "b")
+        issue_id = index.add_issue(issue)
+        index.resolve_issue(issue_id, "resolved", "done")
+        key = _subject_key(
+            "impact_unreviewed",
+            '[{"kind":"item","id":"a"},{"kind":"item","id":"b"}]',
+        )
+        assert index.find_issue_by_subject("impact_unreviewed", key, ("open",)) is None
+        found = index.find_issue_by_subject(
+            "impact_unreviewed", key, ("open", "resolved", "wontfix"),
+        )
+        assert found is not None and found.status == "resolved"
+
+    def test_find_issue_by_subject_miss(self, index: MemoryIndex):
+        from nanobot.agent.memory_index import _subject_key
+        key = _subject_key(
+            "impact_unreviewed",
+            '[{"kind":"item","id":"a"},{"kind":"item","id":"b"}]',
+        )
+        assert index.find_issue_by_subject("impact_unreviewed", key) is None
+
+    def test_bump_issue_seen(self, index: MemoryIndex):
+        issue_id = index.add_issue(self._make_impact_issue(created_at=1000))
+        index.bump_issue_seen(issue_id, now=2000)
+        cur = index._db.execute(
+            "SELECT last_seen_at, seen_count FROM consistency_issues WHERE id=?",
+            (issue_id,),
+        )
+        row = cur.fetchone()
+        assert row["last_seen_at"] == 2000
+        assert row["seen_count"] == 2
+
+    def test_reopen_issue(self, index: MemoryIndex):
+        issue_id = index.add_issue(self._make_impact_issue(created_at=1000))
+        index.resolve_issue(issue_id, "resolved", "handled")
+        index.reopen_issue(issue_id, now=3000)
+        cur = index._db.execute(
+            "SELECT status, last_seen_at, seen_count, resolution, resolved_at "
+            "FROM consistency_issues WHERE id=?",
+            (issue_id,),
+        )
+        row = cur.fetchone()
+        assert row["status"] == "open"
+        assert row["last_seen_at"] == 3000
+        assert row["seen_count"] == 2
+        assert row["resolution"] is None
+        assert row["resolved_at"] is None
+

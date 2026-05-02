@@ -640,5 +640,44 @@ class MemoryIndex:
         )
         self._db.commit()
 
+    def find_issue_by_subject(
+        self,
+        issue_type: str,
+        subject_key: str,
+        statuses: tuple[str, ...] = ("open",),
+    ) -> ConsistencyIssue | None:
+        if not statuses:
+            return None
+        placeholders = ",".join("?" * len(statuses))
+        cur = self._db.execute(
+            f"SELECT * FROM consistency_issues "
+            f"WHERE issue_type=? AND status IN ({placeholders}) "
+            f"ORDER BY created_at DESC",
+            (issue_type, *statuses),
+        )
+        for row in cur.fetchall():
+            issue = _row_to_issue(row)
+            if _subject_key(issue.issue_type, issue.subject_ids) == subject_key:
+                return issue
+        return None
+
+    def bump_issue_seen(self, issue_id: str, now: int) -> None:
+        self._db.execute(
+            "UPDATE consistency_issues "
+            "SET last_seen_at=?, seen_count=seen_count+1 WHERE id=?",
+            (now, issue_id),
+        )
+        self._db.commit()
+
+    def reopen_issue(self, issue_id: str, now: int) -> None:
+        self._db.execute(
+            "UPDATE consistency_issues "
+            "SET status='open', last_seen_at=?, seen_count=seen_count+1, "
+            "    resolution=NULL, resolved_at=NULL "
+            "WHERE id=?",
+            (now, issue_id),
+        )
+        self._db.commit()
+
     def close(self) -> None:
         self._db.close()
