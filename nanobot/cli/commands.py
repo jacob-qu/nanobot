@@ -765,6 +765,32 @@ def gateway(
                 agent.dream.notify = None
             return None
 
+        # Curator is an internal job — state-machine only, no agent loop.
+        if job.name == "curator":
+            from nanobot.agent import curator as _curator
+
+            cur_cfg = config.agents.defaults.curator
+            idle_for = bus.seconds_since_last_inbound()
+            try:
+                out = _curator.maybe_run_curator(
+                    agent.workspace,
+                    agent.skill_usage,
+                    enabled=cur_cfg.enabled,
+                    interval_hours=cur_cfg.interval_hours,
+                    min_idle_hours=cur_cfg.min_idle_hours,
+                    stale_after_days=cur_cfg.stale_after_days,
+                    archive_after_days=cur_cfg.archive_after_days,
+                    backup_keep=cur_cfg.backup_keep,
+                    idle_for_seconds=idle_for,
+                )
+                if out is None:
+                    logger.debug("Curator cron skipped (gated by config/interval/idle)")
+                else:
+                    logger.info("Curator cron completed: {}", out.get("summary", ""))
+            except Exception:
+                logger.exception("Curator cron job failed")
+            return None
+
         from nanobot.agent.tools.cron import CronTool
         from nanobot.agent.tools.message import MessageTool
         from nanobot.utils.evaluator import evaluate_response
@@ -1469,6 +1495,9 @@ def status():
 
 provider_app = typer.Typer(help="Manage providers")
 app.add_typer(provider_app, name="provider")
+
+from nanobot.cli.curator_cmd import app as curator_app  # noqa: E402
+app.add_typer(curator_app, name="curator")
 
 
 _LOGIN_HANDLERS: dict[str, callable] = {}

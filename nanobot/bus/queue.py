@@ -1,6 +1,7 @@
 """Async message queue for decoupled channel-agent communication."""
 
 import asyncio
+import time
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 
@@ -16,9 +17,11 @@ class MessageBus:
     def __init__(self):
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        self._last_inbound_at: float = 0.0  # 0 = never seen one
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
         """Publish a message from a channel to the agent."""
+        self._last_inbound_at = time.time()
         await self.inbound.put(msg)
 
     async def consume_inbound(self) -> InboundMessage:
@@ -42,3 +45,12 @@ class MessageBus:
     def outbound_size(self) -> int:
         """Number of pending outbound messages."""
         return self.outbound.qsize()
+
+    def seconds_since_last_inbound(self) -> float:
+        """Seconds since the last inbound message, or ``+inf`` if none seen yet.
+
+        Used by background tasks (curator, etc.) to gate on user idleness.
+        """
+        if self._last_inbound_at <= 0:
+            return float("inf")
+        return max(0.0, time.time() - self._last_inbound_at)

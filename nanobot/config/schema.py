@@ -99,6 +99,21 @@ class MemoryIndexConfig(Base):
     impact_depth: int = Field(default=2, ge=1, le=3)  # query_impact 传递跳数
 
 
+class CuratorConfig(Base):
+    """Curator (agent-created skill 维护) 配置。
+
+    状态机分两档：stale_after_days → 标 stale；archive_after_days → 归档到
+    skills/.archive/。pinned skill（frontmatter 里 pinned: true）永不触碰。
+    """
+
+    enabled: bool = False  # 默认关，需要手动打开
+    interval_hours: int = Field(default=168, ge=1)  # 两次 run 的最小间隔，默认 7 天
+    min_idle_hours: float = Field(default=2.0, ge=0.0)  # agent 空闲多久才允许跑
+    stale_after_days: int = Field(default=30, ge=1)
+    archive_after_days: int = Field(default=90, ge=1)
+    backup_keep: int = Field(default=5, ge=0)  # 保留的快照数量
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -128,6 +143,7 @@ class AgentDefaults(Base):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     memory_index: MemoryIndexConfig = Field(default_factory=MemoryIndexConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
+    curator: CuratorConfig = Field(default_factory=CuratorConfig)
 
 
 class AgentsConfig(Base):
