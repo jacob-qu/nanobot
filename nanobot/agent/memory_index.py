@@ -254,7 +254,7 @@ class MemoryIndex:
                 "UPDATE consistency_issues "
                 "SET last_seen_at = created_at WHERE last_seen_at IS NULL"
             )
-            self.set_meta("schema_version", "2")
+            self.set_meta("schema_version", _SCHEMA_VERSION)
             self._db.commit()
 
         # ---- embedding dim guard --------------------------------------

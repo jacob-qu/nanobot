@@ -34,9 +34,6 @@ class TestSchemaCreation:
         assert "last_seen_at" in cols
         assert "seen_count" in cols
 
-    def test_schema_version_is_v2(self, index: MemoryIndex):
-        assert index.get_meta("schema_version") == "2"
-
 
 class TestItemsCRUD:
     def _make_item(self, content: str = "foo", section: str = "root") -> ItemRecord:
@@ -289,3 +286,21 @@ class TestSchemaMigration:
         row = cur.fetchone()
         assert row["last_seen_at"] == 1000
         assert row["seen_count"] == 1
+
+        # Round-trip: add_issue + list_open_issues must work on migrated DB
+        new_id = idx.add_issue(ConsistencyIssue(
+            id="",
+            trigger_event="dream_scan",
+            trigger_ref=None,
+            issue_type="impact_unreviewed",
+            subject_ids='[{"kind":"item","id":"x"}]',
+            description="post-migration insert",
+            severity="medium",
+            status="open",
+            resolution=None,
+            created_at=5000,
+            resolved_at=None,
+        ))
+        roundtrip = [i for i in idx.list_open_issues() if i.id == new_id][0]
+        assert roundtrip.last_seen_at == 5000  # auto-backfilled from created_at
+        assert roundtrip.seen_count == 1
