@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 import struct
@@ -127,6 +128,31 @@ def _row_to_issue(row: sqlite3.Row) -> ConsistencyIssue:
         last_seen_at=row["last_seen_at"],
         seen_count=row["seen_count"],
     )
+
+
+def _subject_key(issue_type: str, subject_ids_json: str) -> str:
+    """Stable dedup key across Dream runs (order-invariant)."""
+    try:
+        parts = json.loads(subject_ids_json)
+    except json.JSONDecodeError:
+        return f"{issue_type}|__raw__|{subject_ids_json}"
+    if not isinstance(parts, list):
+        return f"{issue_type}|__raw__|{subject_ids_json}"
+    if issue_type == "impact_unreviewed":
+        tokens = sorted(
+            p["id"] for p in parts
+            if isinstance(p, dict) and "id" in p
+        )
+    elif issue_type == "id_remap_ambiguous":
+        tokens = sorted(
+            p["hash"] for p in parts
+            if isinstance(p, dict) and "hash" in p
+        )
+    else:
+        tokens = sorted(
+            json.dumps(p, sort_keys=True, ensure_ascii=False) for p in parts
+        )
+    return f"{issue_type}|" + "|".join(tokens)
 
 
 def _unpack_floats(blob: bytes) -> list[float]:

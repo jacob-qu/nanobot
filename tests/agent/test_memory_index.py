@@ -304,3 +304,53 @@ class TestSchemaMigration:
         roundtrip = [i for i in idx.list_open_issues() if i.id == new_id][0]
         assert roundtrip.last_seen_at == 5000  # auto-backfilled from created_at
         assert roundtrip.seen_count == 1
+
+
+class TestSubjectKey:
+    def test_impact_unreviewed_order_invariant(self):
+        from nanobot.agent.memory_index import _subject_key
+        a = _subject_key(
+            "impact_unreviewed",
+            '[{"kind":"item","id":"x"},{"kind":"item","id":"y"}]',
+        )
+        b = _subject_key(
+            "impact_unreviewed",
+            '[{"kind":"item","id":"y"},{"kind":"item","id":"x"}]',
+        )
+        assert a == b
+
+    def test_impact_unreviewed_distinct_pairs_differ(self):
+        from nanobot.agent.memory_index import _subject_key
+        a = _subject_key(
+            "impact_unreviewed",
+            '[{"kind":"item","id":"x"},{"kind":"item","id":"y"}]',
+        )
+        b = _subject_key(
+            "impact_unreviewed",
+            '[{"kind":"item","id":"x"},{"kind":"item","id":"z"}]',
+        )
+        assert a != b
+
+    def test_id_remap_ambiguous_order_invariant(self):
+        from nanobot.agent.memory_index import _subject_key
+        a = _subject_key(
+            "id_remap_ambiguous",
+            '[{"kind":"item","hash":"h1"},{"kind":"item","hash":"h2"}]',
+        )
+        b = _subject_key(
+            "id_remap_ambiguous",
+            '[{"kind":"item","hash":"h2"},{"kind":"item","hash":"h1"}]',
+        )
+        assert a == b
+
+    def test_unknown_type_falls_back_to_json(self):
+        from nanobot.agent.memory_index import _subject_key
+        key = _subject_key("some_future_type", '[{"foo":"bar"}]')
+        assert key.startswith("some_future_type|")
+
+    def test_malformed_json_does_not_raise(self):
+        from nanobot.agent.memory_index import _subject_key
+        key = _subject_key("impact_unreviewed", "not valid json")
+        assert isinstance(key, str)
+        assert "impact_unreviewed" in key
+
