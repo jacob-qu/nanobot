@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.agent.memory_index import ConsistencyIssue, MemoryIndex
-from nanobot.agent.tools.memory_query import ResolveIssuesTool
+from nanobot.agent.tools.memory_query import ListOpenIssuesTool, ResolveIssuesTool
 
 
 @pytest.fixture
@@ -105,3 +105,31 @@ class TestResolveIssuesTool:
             issue_ids=[], resolution="foo", status="resolved",
         )
         assert "issue_ids" in out.lower() or "空" in out
+
+
+class TestListOpenIssuesOutput:
+    @pytest.mark.asyncio
+    async def test_seen_count_shown_when_greater_than_one(
+        self, index: MemoryIndex,
+    ):
+        issue_id = _seed(index, "a", "b", created_at=1000)
+        # simulate dedup hit
+        index.bump_issue_seen(issue_id, now=2000)
+        index.bump_issue_seen(issue_id, now=3000)
+        tool = ListOpenIssuesTool(index)
+        out = await tool.execute(severity="low")
+        assert "连续 3 轮" in out
+
+    @pytest.mark.asyncio
+    async def test_first_seen_omits_seen_count_line(self, index: MemoryIndex):
+        _seed(index, "a", "b")
+        tool = ListOpenIssuesTool(index)
+        out = await tool.execute(severity="low")
+        assert "连续" not in out
+
+    @pytest.mark.asyncio
+    async def test_hints_resolve_issues(self, index: MemoryIndex):
+        _seed(index, "a", "b")
+        tool = ListOpenIssuesTool(index)
+        out = await tool.execute(severity="low")
+        assert "resolve_issues" in out

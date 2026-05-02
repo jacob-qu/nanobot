@@ -79,9 +79,12 @@ class ContextBuilder:
                 "- `trigger_dream(reason)`：触发一轮真正的 Dream（记忆整理 + reconcile）。"
                 "用户说 `/dream`、'reconcile 一下'、'跑一次 dream'、"
                 "'做一次一致性检查' 时都走此工具——**不要 spawn subagent 自己模拟**\n"
-                "- `list_open_issues(severity)`：查看 Dream reconcile 产生的未处理一致性告警\n\n"
+                "- `list_open_issues(severity)`：查看 Dream reconcile 产生的未处理一致性告警\n"
+                "- `resolve_issues(issue_ids, resolution, status)`：关闭已处理（resolved）"
+                "或永久忽略（wontfix）告警；resolution 必填\n\n"
                 "典型链路：用户改记忆 → 先 `query_memory_impact` → 用 `edit_file` 落盘 → "
-                "`trigger_dream` → 稍后 `list_open_issues` 回看本轮告警。"
+                "`trigger_dream` → `list_open_issues` 看本轮告警 → "
+                "对可处理项用 `resolve_issues` 关闭。"
             )
 
         return "\n\n---\n\n".join(parts)

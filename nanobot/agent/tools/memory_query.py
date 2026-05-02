@@ -258,14 +258,35 @@ class ListOpenIssuesTool(Tool):
         return True
 
     async def execute(self, severity: str = "medium", **kwargs: Any) -> str:
+        import datetime as _dt
+
         issues = self._index.list_open_issues(severity_min=severity)
         if not issues:
             return f"没有待处理的一致性告警（severity ≥ {severity}）。"
-        lines = [f"# 未处理的记忆一致性告警（{len(issues)} 条，severity ≥ {severity}）", ""]
+        lines = [
+            f"# 未处理的记忆一致性告警（{len(issues)} 条，severity ≥ {severity}）",
+            "",
+        ]
         for i in issues:
             lines.append(f"## [{i.severity}] {i.issue_type}")
             lines.append(i.description)
+            if i.seen_count > 1:
+                created = _dt.datetime.fromtimestamp(i.created_at).strftime("%Y-%m-%d")
+                last_seen = (
+                    _dt.datetime.fromtimestamp(i.last_seen_at).strftime("%Y-%m-%d")
+                    if i.last_seen_at else created
+                )
+                lines.append(
+                    f"_已连续 {i.seen_count} 轮 Dream 未处理（首次 {created}，"
+                    f"最近 {last_seen}）_"
+                )
+            lines.append(f"_id: {i.id}_")
             lines.append("")
+        lines.append(
+            "💡 处理完后，用 `resolve_issues(issue_ids=[...], "
+            "resolution='...', status='resolved'|'wontfix')` 关闭，"
+            "否则告警会在下轮 Dream 继续被计数（seen_count+1）。"
+        )
         return "\n".join(lines).rstrip()
 
 
